@@ -29,6 +29,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src"
@@ -95,15 +96,20 @@ class StubAO(BaseHTTPRequestHandler):
         self._reply(200, {"ok": True})
 
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}"
         if self.path == "/api/v1/auth/token":
-            ok = (body.get("grant_type") == "client_credentials" and body.get("client_id") == "stub-client"
-                  and body.get("client_secret") == "stub-secret")
+            # Like the real AO: OAuth 2.0 client_credentials, form-encoded. A JSON body is a 422.
+            if "application/x-www-form-urlencoded" not in (self.headers.get("Content-Type") or ""):
+                return self._reply(422, {"detail": "Validation failed: grant_type: Field required"})
+            form = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+            ok = (form.get("grant_type") == "client_credentials" and form.get("client_id") == "stub-client"
+                  and form.get("client_secret") == "stub-secret")
             if ok:
                 ao_seen["tokens"] += 1
             self._reply(200 if ok else 401, {"access_token": "stub-token", "expires_in": 3600} if ok
                         else {"error": "bad client credentials"})
         elif self.path == f"/api/v1/webhooks/{AO_WEBHOOK}":
+            body = json.loads(raw)
             if self.headers.get("Authorization") != "Bearer stub-token":
                 return self._reply(401, {"error": "unauthorized"})
             ao_seen["webhooks"].append(body)
