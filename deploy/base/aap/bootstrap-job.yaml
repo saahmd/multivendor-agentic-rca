@@ -42,6 +42,11 @@ spec:
             - { name: SCM_BRANCH, value: "main" }
             - name: AAP_ADMIN_PASSWORD
               valueFrom: { secretKeyRef: { name: aap-admin-password, key: password } }
+            # Optional: base64 of a subscription manifest zip. AAP has no license by default and then
+            # cannot create hosts or launch jobs. Create it with:
+            #   oc create secret generic aap-subscription -n aap --from-literal=manifest="$(base64 < manifest.zip | tr -d '\n')"
+            - name: AAP_SUBSCRIPTION_MANIFEST_B64
+              valueFrom: { secretKeyRef: { name: aap-subscription, key: manifest, optional: true } }
           volumeMounts:
             - { name: scripts, mountPath: /scripts, readOnly: true }
           resources:

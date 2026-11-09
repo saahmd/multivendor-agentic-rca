@@ -17,7 +17,7 @@ No MCP server and no mcp-gateway change: the AO agent has no tools.
 The `mvrca-aap` Argo CD Application runs `deploy/base/aap/bootstrap/bootstrap_aap.py` as a PostSync Job (`aap-bootstrap`) once AAP is up. It is idempotent, so it runs on every sync. It creates, in organization `Default`:
 
 - project `RAN Remediation`: this repo from the in-cluster Gitea, branch `main` (change `SCM_URL` / `SCM_BRANCH` in `deploy/base/aap/bootstrap-job.yaml` for another source). **Push the repo to Gitea first**, or the project sync fails and the Job retries.
-- inventory `RAN Localhost` with one host, `localhost`, local connection.
+- inventory `RAN Localhost` with one host, `localhost`, local connection (skipped with a warning if AAP has no subscription).
 - job templates, each allowing extra variables at launch:
 
 | Job template name | Playbook |
@@ -27,7 +27,10 @@ The `mvrca-aap` Argo CD Application runs `deploy/base/aap/bootstrap/bootstrap_aa
 | `RAN - Escalate` | `ran_escalate.yml` |
 | `RAN - Record Rejection` | `ran_record_rejection.yml` |
 
-The workflow refers to the templates by name, so these names must not change. Check the result with `oc logs job/aap-bootstrap -n aap`. The Job reads the admin password from Secret `aap-admin-password` (key `password`), which the AAP operator creates for the instance named `aap`. Without Argo CD, `oc apply -k deploy/overlays/aap` runs it as an ordinary Job.
+The workflow refers to the templates by name, so these names must not change.
+
+**AAP needs a subscription.** A fresh AAP has none (`license_info` is empty in `/api/controller/v2/config/`) and then refuses to create hosts or launch jobs (`License is missing`), so the heal job cannot run. Attach one in the AAP UI (Settings > Subscription), or give the bootstrap a Red Hat subscription manifest:
+`oc create secret generic aap-subscription -n aap --from-literal=manifest="$(base64 < manifest.zip | tr -d '\n')"`, then re-sync `mvrca-aap`. Without a subscription the Job still creates the project and templates but exits non-zero on purpose, so the sync shows as failed until one is attached. Check the result with `oc logs job/aap-bootstrap -n aap`. The Job reads the admin password from Secret `aap-admin-password` (key `password`), which the AAP operator creates for the instance named `aap`. Without Argo CD, `oc apply -k deploy/overlays/aap` runs it as an ordinary Job.
 
 ## AO setup
 

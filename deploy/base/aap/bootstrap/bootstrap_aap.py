@@ -4,7 +4,8 @@ looked up by name and created or updated, so re-running (Argo CD runs it after e
 
 Creates, in organization Default:
   project         RAN Remediation          this repo, from the in-cluster Gitea (public repo, no credential)
-  inventory       RAN Localhost            one host, localhost, local connection (the playbooks only call HTTP APIs)
+  inventory       RAN Localhost            one host, localhost, local connection (the playbooks only call HTTP APIs).
+                                           The host needs an AAP subscription; without one it is skipped with a warning.
   job templates   RAN - Heal PTP Timing / Close RCA / Escalate / Record Rejection
 
 The AO workflow (ao-remediation/ao/ran-timing-remediation.json) refers to these templates by name, so the
@@ -28,6 +29,9 @@ ORG = os.environ.get("AAP_ORGANIZATION", "Default")
 WAIT_READY = float(os.environ.get("WAIT_READY_SECONDS", "2400"))     # AAP takes a while to come up
 WAIT_PROJECT = float(os.environ.get("WAIT_PROJECT_SECONDS", "300"))
 PLAYBOOK_DIR = "ao-remediation/aap/playbooks"
+# Optional: base64 of a Red Hat subscription manifest zip (Secret `aap-subscription`, key `manifest`).
+# Applied only when AAP has no license yet.
+MANIFEST_B64 = os.environ.get("AAP_SUBSCRIPTION_MANIFEST_B64", "").strip()
 
 TEMPLATES = {
     "RAN - Heal PTP Timing": "ran_heal_ptp.yml",
@@ -78,6 +82,26 @@ def wait_for_aap():
             last = f"HTTP {code}: {body.get('detail', '')}"
         time.sleep(15)
     sys.exit(f"AAP not ready after {WAIT_READY:.0f}s ({last})")
+
+
+def ensure_license():
+    """AAP refuses to create hosts or launch jobs without a subscription. Attach one from the optional
+    Secret if given; otherwise warn (the demo's heal job cannot launch until one is attached)."""
+    code, cfg = call("GET", "/config/")
+    if code == 200 and cfg.get("license_info"):
+        log("AAP has a subscription")
+        return True
+    if MANIFEST_B64:
+        code, body = call("POST", "/config/", {"eula_accepted": True, "manifest": MANIFEST_B64}, timeout=120)
+        if code in (200, 201):
+            log("subscription manifest applied")
+            return True
+        log(f"WARNING: applying the subscription manifest failed: HTTP {code} {str(body)[:200]}")
+    else:
+        log("WARNING: AAP has no subscription. Attach one in the AAP UI (Settings > Subscription), or create Secret "
+            "aap-subscription (key manifest = base64 of the manifest zip) in namespace aap and re-sync. "
+            "Hosts cannot be created and jobs will not launch until then.")
+    return False
 
 
 def find(kind, name, **filters):
@@ -135,12 +159,16 @@ def main():
     inv = ensure("inventories", "RAN Localhost", {"organization": org["id"],
                  "description": "The remediation playbooks only call in-cluster HTTP APIs from the controller"},
                  organization=org["id"])
+    licensed = ensure_license()
     if not find("hosts", "localhost", inventory=inv["id"]):
         code, body = call("POST", f"/inventories/{inv['id']}/hosts/",
                           {"name": "localhost", "variables": "ansible_connection: local\nansible_python_interpreter: \"{{ ansible_playbook_python }}\""})
-        if code not in (200, 201):
+        if code in (200, 201):
+            log("host 'localhost' created")
+        elif not licensed:
+            log(f"host 'localhost' skipped: HTTP {code} {body.get('detail', body)} (the playbooks use the implicit localhost)")
+        else:
             sys.exit(f"host 'localhost' could not be created: HTTP {code} {body}")
-        log("host 'localhost' created")
 
     for name, playbook in TEMPLATES.items():
         ensure("job_templates", name,
@@ -149,6 +177,9 @@ def main():
                 "description": "Launched by the Automation Orchestrator workflow 'RAN Timing Fault - Governed Remediation'"},
                organization=org["id"])
 
+    if not licensed:
+        sys.exit("project and job templates are created, but AAP has no subscription: attach one, then re-sync "
+                 "mvrca-aap (see the WARNING above). Exiting non-zero so this is not mistaken for done.")
     log("AAP side of the RAN remediation is ready. The AO side (integrations, service account, workflow import) "
         "is manual: see ao-remediation/REQUIREMENTS.md")
 
