@@ -105,10 +105,10 @@ Concept page: [The timing fault](concepts/timing-fault.md)
 
 | Term | In this demo | Code |
 |---|---|---|
-| <a id="nep-orchestrator"></a>**[NEP orchestrator](concepts/audit-trail.md)** | The RCA agent. One HTTP call runs the whole investigation in six steps. | [nep_orchestrator.py](../src/services/orchestrator/nep_orchestrator.py) |
+| <a id="nep-orchestrator"></a>**[NEP orchestrator](concepts/audit-trail.md)** | The RCA agent. One HTTP call runs the whole investigation in seven steps (the seventh, handing the verdict to Automation Orchestrator, is optional). | [nep_orchestrator.py](../src/services/orchestrator/nep_orchestrator.py) |
 | <a id="rca"></a>**[RCA](concepts/decision.md)** | Root cause analysis: collect evidence, decide the fault, explain it. | [nep_orchestrator.py#L248](../src/services/orchestrator/nep_orchestrator.py#L248) |
-| <a id="span"></a>**[Span](concepts/audit-trail.md)** | One step of an RCA, with its timing and status. There are six. See [concept page](concepts/audit-trail.md). <br>Definition: [OpenTelemetry](https://opentelemetry.io/docs/concepts/signals/traces/) | [nep_orchestrator.py#L258](../src/services/orchestrator/nep_orchestrator.py#L258) |
-| <a id="trace"></a>**[Trace](concepts/audit-trail.md)** | All six spans of one RCA, with a trace ID. Kept in memory only. <br>Definition: [OpenTelemetry](https://opentelemetry.io/docs/concepts/signals/traces/) | [nep_orchestrator.py#L248](../src/services/orchestrator/nep_orchestrator.py#L248) |
+| <a id="span"></a>**[Span](concepts/audit-trail.md)** | One step of an RCA, with its timing and status. There are seven. See [concept page](concepts/audit-trail.md). <br>Definition: [OpenTelemetry](https://opentelemetry.io/docs/concepts/signals/traces/) | [nep_orchestrator.py#L258](../src/services/orchestrator/nep_orchestrator.py#L258) |
+| <a id="trace"></a>**[Trace](concepts/audit-trail.md)** | All seven spans of one RCA, with a trace ID. Kept in memory only. <br>Definition: [OpenTelemetry](https://opentelemetry.io/docs/concepts/signals/traces/) | [nep_orchestrator.py#L248](../src/services/orchestrator/nep_orchestrator.py#L248) |
 
 ## Authorization
 

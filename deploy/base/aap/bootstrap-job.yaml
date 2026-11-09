@@ -1,0 +1,52 @@
+# Runs bootstrap/bootstrap_aap.py once AAP is up: creates the AAP project, inventory and the four job
+# templates the Automation Orchestrator workflow launches. Idempotent, so it is safe to run on every sync.
+#
+# Under Argo CD this is a PostSync hook, recreated on each sync (BeforeHookCreation). The AAP custom
+# resource has no Argo health check, so Argo reports it Healthy before AAP is actually serving; the
+# script therefore waits for the controller itself (up to 40 minutes). With a plain `oc apply -k` the
+# hook annotations are ignored and this is an ordinary Job (delete it before re-applying; Job specs are
+# immutable).
+#
+# The admin password comes from the Secret the AAP operator creates for the instance named `aap`
+# (aap-admin-password, key `password`). Until that Secret exists the pod waits in
+# CreateContainerConfigError, which is expected.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aap-bootstrap
+  namespace: aap
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels: { app: aap-bootstrap }
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: registry.access.redhat.com/ubi9/python-312:latest
+          command: ["python3", "-I", "/scripts/bootstrap_aap.py"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities: { drop: [ALL] }
+            seccompProfile: { type: RuntimeDefault }
+          env:
+            - { name: AAP_URL, value: "http://aap.aap.svc.cluster.local" }
+            # This repo, from the in-cluster Gitea. Change both when the repo or branch is elsewhere.
+            - { name: SCM_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000/gitadmin/multivendor-agentic-rca.git" }
+            - { name: SCM_BRANCH, value: "main" }
+            - name: AAP_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: aap-admin-password, key: password } }
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+      volumes:
+        - name: scripts
+          configMap: { name: aap-bootstrap-script }

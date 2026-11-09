@@ -4,4 +4,5 @@ resources:
   - operators-application.yaml
   - gpu-operator-application.yaml
   - connectivity-link-application.yaml
+  - aap-application.yaml
   - platform-applications.yaml

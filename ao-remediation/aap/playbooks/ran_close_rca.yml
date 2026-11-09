@@ -1,0 +1,26 @@
+---
+- name: RAN - Close RCA
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    base_url: "{{ nep_url | default('http://nep-orchestrator.multivendor-rca.svc:7095') }}"
+    trace_id: "{{ original_trace_id | default('unknown') }}"
+
+  tasks:
+    # NEP has no write endpoint for outcomes, so this step records the verification result
+    # in the AAP job output (the AO execution history links to it). The console already
+    # shows the healed state from /api/ran/status.
+    - name: Read the verification RCA from the NEP audit
+      ansible.builtin.uri:
+        url: "{{ base_url }}/nep/audit/latest"
+        method: GET
+        return_content: true
+        status_code: [200]
+      register: latest
+
+    - name: Close the RCA
+      ansible.builtin.debug:
+        msg:
+          - "RCA {{ trace_id }} closed: heal verified."
+          - "Verification decision: {{ latest.json.tmf688Event.event.decision | default('see /nep/audit/latest') }}"

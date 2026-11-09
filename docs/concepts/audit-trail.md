@@ -52,7 +52,7 @@ Full examples: [heal-recheck-run.md](../examples/heal-recheck-run.md), [openshif
 
 ## Code
 
-- The six spans: [nep_orchestrator.py#L248](../../src/services/orchestrator/nep_orchestrator.py#L248)
+- The seven spans: [nep_orchestrator.py#L248](../../src/services/orchestrator/nep_orchestrator.py#L248)
 - TMF688 event: [nep_orchestrator.py#L413](../../src/services/orchestrator/nep_orchestrator.py#L413)
 - Narrative and template fallback: [nep_orchestrator.py#L195](../../src/services/orchestrator/nep_orchestrator.py#L195)
 - Audit endpoints and history: [nep_orchestrator.py#L468](../../src/services/orchestrator/nep_orchestrator.py#L468)

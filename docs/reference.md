@@ -77,6 +77,11 @@ Every value below is an environment variable. The manifests in `deploy/base/sand
 | `LLM_TIMEOUT` / `LLM_MAX_TOKENS` | `90` / `4096` | |
 | `NIC_FAULT_MODE` | `follow-ptp` | `follow-ptp`: the emulated NIC reports a fault only while PTP was read and is unlocked. `always` / `never` pin it. The NIC plane never counts toward the decision bar. |
 | `MLFLOW_TRACKING_URI` | empty | Label copied into traces; nothing is logged to MLflow |
+| `AO_URL` | empty (AO off) | Automation Orchestrator base URL. With `AO_CLIENT_ID` and `AO_CLIENT_SECRET` set, a `HOLD` or `APPLY` verdict is POSTed to AO (span 7). Any of the three unset = span 7 is `SKIPPED` and nothing else changes. |
+| `AO_CLIENT_ID` / `AO_CLIENT_SECRET` | empty | AO service account credential (client credentials). Read from the optional Secret `ao-webhook`. |
+| `AO_WEBHOOK_PATH` | `ran-rca-concluded` | The AO workflow trigger's `webhook_path` |
+| `AO_TIMEOUT` | `10` | Seconds for each AO call (token and webhook). An AO failure never fails the RCA. |
+| `RAN_CELL_ID` | `odu-1` | Sent to AO as `target.cell` |
 | `POD_NAMESPACE` | set from the Downward API | Shown by `/nep/health` |
 
 ### MCP servers and gateway

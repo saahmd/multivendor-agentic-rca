@@ -1,0 +1,51 @@
+# Step 1 of 2: AAP operator (OwnNamespace). Channel stable-2.7 is in the cluster's redhat-operators catalog.
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: aap-og
+  namespace: aap
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  targetNamespaces:
+    - aap
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: ansible-automation-platform-operator
+  namespace: aap
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+    argocd.argoproj.io/ignore-healthcheck: "true"
+spec:
+  channel: stable-2.7
+  installPlanApproval: Automatic
+  name: ansible-automation-platform-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+---
+# Step 2 of 2: Automation Orchestrator operator (AllNamespaces only, channel stable = v2026.8).
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: automation-orchestrator-og
+  namespace: automation-orchestrator-operator
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec: {}
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: automation-orchestrator-operator
+  namespace: automation-orchestrator-operator
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+    argocd.argoproj.io/ignore-healthcheck: "true"
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: automation-orchestrator-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace

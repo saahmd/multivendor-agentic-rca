@@ -1,0 +1,19 @@
+---
+- name: RAN - Record rejection / open incident
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    trace_id: "{{ original_trace_id | default('unknown') }}"
+    fault: "{{ fault_class | default('unknown') }}"
+    sig: "{{ signal | default('unknown') }}"
+
+  tasks:
+    # Placeholder for the lab: a real deployment would open an incident here. The job output
+    # and the AO audit history are the record of who rejected the remediation and when.
+    - name: Record the rejected remediation
+      ansible.builtin.debug:
+        msg:
+          - "Remediation REJECTED for RCA {{ trace_id }}."
+          - "Fault: {{ fault }} ({{ sig }}). No action was taken."
+          - "Incident opened for manual follow-up."

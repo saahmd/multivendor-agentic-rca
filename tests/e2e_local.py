@@ -10,6 +10,8 @@ the sandbox HTTP API exactly like the browser does and checks what comes back:
   inject -> PTP FREERUN, O-DU cell UNAVAILABLE + CellUnavailable alarm
   RCA    -> OC-TimingDegraded; RAN + PTP planes corroborate (2/3), the emulated NIC agrees but is
             not counted -> HOLD; CAPIF token issued once and reused
+  AO     -> a stub Automation Orchestrator receives the HOLD verdict (token + webhook); a run tagged
+            ao-verify is not handed back; a NO ACTION run is not dispatched
   heal   -> cell ACTIVE, alarm cleared, PTP LOCKED; RCA finds no fault -> NO ACTION
   stop   -> slice gone
 
@@ -22,8 +24,10 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -37,6 +41,9 @@ CAPIF = f"http://127.0.0.1:{7027 + CAPIF_OFFSET}"
 MCP = {"ocloud": 28850, "ran": 28851, "intel": 28852, "redhat": 28853}
 GATEWAY_PORT, NEP_PORT, SANDBOX_PORT = 28880, 27095, 27098
 SANDBOX = f"http://127.0.0.1:{SANDBOX_PORT}"
+AO_PORT = 29090
+AO_WEBHOOK = "ran-rca-concluded"
+ao_seen = {"tokens": 0, "webhooks": []}          # what the stub Automation Orchestrator received
 
 procs = []
 failures = 0
@@ -70,6 +77,41 @@ def wait_http(url, timeout=30):
     return False
 
 
+class StubAO(BaseHTTPRequestHandler):
+    """Just enough of Automation Orchestrator: a client_credentials token endpoint and the webhook."""
+
+    def log_message(self, *args):
+        pass
+
+    def _reply(self, code, body):
+        b = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        self._reply(200, {"ok": True})
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        if self.path == "/api/v1/auth/token":
+            ok = (body.get("grant_type") == "client_credentials" and body.get("client_id") == "stub-client"
+                  and body.get("client_secret") == "stub-secret")
+            if ok:
+                ao_seen["tokens"] += 1
+            self._reply(200 if ok else 401, {"access_token": "stub-token", "expires_in": 3600} if ok
+                        else {"error": "bad client credentials"})
+        elif self.path == f"/api/v1/webhooks/{AO_WEBHOOK}":
+            if self.headers.get("Authorization") != "Bearer stub-token":
+                return self._reply(401, {"error": "unauthorized"})
+            ao_seen["webhooks"].append(body)
+            self._reply(202, {"execution_id": f"exec-stub-{len(ao_seen['webhooks'])}"})
+        else:
+            self._reply(404, {"error": "not found"})
+
+
 def check(label, ok, detail=""):
     global failures
     failures += 0 if ok else 1
@@ -97,6 +139,9 @@ def main():
         text = text.replace(f"http://mcp-{name}:{8850 + list(MCP).index(name)}", f"http://127.0.0.1:{port}")
     policy.write_text(text)
 
+    ao_server = ThreadingHTTPServer(("127.0.0.1", AO_PORT), StubAO)
+    threading.Thread(target=ao_server.serve_forever, daemon=True).start()
+
     spawn("ptp-bridge", [PY, "services/smo/ptp_bridge.py"], {"PTP_BRIDGE_PORT": str(PTP_PORT)})
     spawn("capif", [PY, "services/core/capif/capif.py"], {"TELCO_PORT_OFFSET": str(CAPIF_OFFSET)})
     mcp_env = {"ran": {"RAN_O1_URL": ODU}, "redhat": {"TELCO_PTP_URL": f"http://127.0.0.1:{PTP_PORT}"}}
@@ -108,7 +153,9 @@ def main():
     spawn("nep", [PY, "services/orchestrator/nep_orchestrator.py"], {
         "PORT": str(NEP_PORT), "PTP_BRIDGE_URL": f"http://127.0.0.1:{PTP_PORT}", "ODU_URL": ODU,
         "CAPIF_URL": CAPIF, "MCP_GATEWAY_URL": f"http://127.0.0.1:{GATEWAY_PORT}",
-        "AI_GATEWAY_URL": "http://127.0.0.1:9", "SMO_URL": "http://127.0.0.1:9"})
+        "AI_GATEWAY_URL": "http://127.0.0.1:9", "SMO_URL": "http://127.0.0.1:9",
+        "AO_URL": f"http://127.0.0.1:{AO_PORT}", "AO_WEBHOOK_PATH": AO_WEBHOOK,
+        "AO_CLIENT_ID": "stub-client", "AO_CLIENT_SECRET": "stub-secret"})
     spawn("stub-kube", [PY, str(REPO / "tests/stub_kube.py"), str(SRC), str(KUBE_PORT), str(SLICE_OFFSET)])
     spawn("sandbox", [PY, "services/ran/sandbox_controller.py"], {
         "PORT": str(SANDBOX_PORT), "K8S_API_URL": f"http://127.0.0.1:{KUBE_PORT}",
@@ -172,6 +219,28 @@ def main():
     check("LLM narrative labeled as template when no LLM",
           rca["llmSynthesis"]["model"].startswith("none"), rca["llmSynthesis"]["summary"][:60])
 
+    print("AO hand-off (span 7):")
+    span7 = next(sp for sp in rca["spans"] if sp["spanId"] == "span-7-ao-handoff")["attributes"]
+    check("verdict field is HOLD", ev.get("verdict") == "HOLD", ev.get("verdict"))
+    check("span 7 DISPATCHED with an execution id",
+          span7["ao.status"] == "DISPATCHED" and span7["ao.executionId"] == "exec-stub-1", str(span7))
+    hook = ao_seen["webhooks"][0] if ao_seen["webhooks"] else {}
+    check("AO got exactly one webhook, with an AO token request", len(ao_seen["webhooks"]) == 1 and ao_seen["tokens"] == 1,
+          f"webhooks={len(ao_seen['webhooks'])} tokens={ao_seen['tokens']}")
+    check("webhook carries the verdict and the fields the workflow reads",
+          hook.get("verdict") == "HOLD" and hook.get("traceId") == ev["traceId"]
+          and all(hook.get(k) for k in ("decision", "faultClass", "signal", "corroboration", "planes", "evidence",
+                                       "llmNarrative", "target")), str(sorted(hook))[:90])
+    check("webhook decision is the NEP decision, unchanged", hook.get("decision") == ev["decision"])
+    verify = http("POST", f"http://127.0.0.1:{NEP_PORT}/nep/rca/trigger?trigger=ao-verify-1&view=full")
+    v7 = next(sp for sp in verify["spans"] if sp["spanId"] == "span-7-ao-handoff")["attributes"]
+    check("a run tagged ao-verify is not handed back to AO (still faulted, HOLD)",
+          verify["tmf688Event"]["event"]["verdict"] == "HOLD" and v7["ao.status"] == "SKIPPED"
+          and len(ao_seen["webhooks"]) == 1, v7.get("ao.reason"))
+    second = http("POST", SANDBOX + "/api/ran/trigger-rca")
+    check("AO token reused on the second dispatch", ao_seen["tokens"] == 1 and len(ao_seen["webhooks"]) == 2,
+          f"tokens={ao_seen['tokens']}")
+
     print("heal:")
     http("POST", SANDBOX + "/api/ran/heal-ptp")
     time.sleep(2.5)
@@ -184,6 +253,10 @@ def main():
           ev["decision"])
     capif = next(sp for sp in rca["spans"] if sp["spanId"] == "span-2-capif-authz")["attributes"]
     check("CAPIF token reused on the second RCA (no re-onboarding)", capif.get("capif.tokenSource") == "cached")
+    after7 = next(sp for sp in rca["spans"] if sp["spanId"] == "span-7-ao-handoff")["attributes"]
+    check("NO ACTION: verdict NO_ACTION, span 7 SKIPPED, nothing sent to AO",
+          ev["verdict"] == "NO_ACTION" and after7["ao.status"] == "SKIPPED" and len(ao_seen["webhooks"]) == 2,
+          after7.get("ao.reason"))
 
     print("logs:")
     logs = http("GET", SANDBOX + "/api/ran/logs")

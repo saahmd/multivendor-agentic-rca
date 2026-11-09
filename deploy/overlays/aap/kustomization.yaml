@@ -1,0 +1,8 @@
+# oc apply -k deploy/overlays/aap
+# The two CRs (AnsibleAutomationPlatform, AutomationOrchestrator) are rejected until their operators'
+# CRDs exist. On a plain `oc apply` re-run it once the CSVs are Succeeded, or let Argo CD sync it
+# (SkipDryRunOnMissingResource + sync waves).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base/aap

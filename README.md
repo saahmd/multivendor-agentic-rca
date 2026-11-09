@@ -16,6 +16,7 @@ You open a web console, start a RAN, watch a UE attach, inject a timing fault, a
 | **Start RAN Slice** | The console scales the `ran-slice` Deployment from 0 to 1. The pod boots 32 network functions. When the O-DU reports `cellState=ACTIVE` over O1, a UE registers with real 5G-AKA (MILENAGE), opens a PDU session, and sends 3 echoes through the GTP-U tunnel. |
 | **Inject Fault** | The PTP bridge goes `FREERUN` with a −50 ms offset. The console locks the cell over O1 as a protective carrier shutdown. The O-DU then raises the TS 28.532 alarm `CellUnavailable / lossOfRealTimeSynchronization` itself. |
 | **Run RCA** | The NEP orchestrator ingests the O1 alarms and PTP state and gets a scoped CAPIF token. It then asks four MCP "planes" for testimony and routes the signals through a deterministic table; no LLM is involved in the decision. During the fault it diagnoses `OC-TimingDegraded` with **2/3** corroborating real planes (RAN + PTP). The emulated NIC agrees but is not counted, so the verdict is **HOLD** (needs human approval). It emits a TMF688 `RcaConcludedEvent`. If an LLM is configured, it narrates the evidence. |
+| **Governed remediation** (optional) | With Automation Orchestrator and AAP installed, Run RCA also hands the `HOLD` verdict to AO. An LLM task agent explains it, a person approves in the AO UI, and an AAP job heals PTP. The decision stays with NEP's deterministic table. Setup: [ao-remediation/](ao-remediation/README.md). |
 | **Heal Timing** | PTP goes back to `LOCKED`, the cell is unlocked and back to `ACTIVE`, and the alarm clears. A second RCA finds no fault (`NO ACTION`). |
 | **Stop RAN Slice** | The slice scales to 0, and its CPU and memory are released. |
 
@@ -101,6 +102,8 @@ deploy/overlays/gpu-operator/       oc apply -k deploy/overlays/gpu-operator
 deploy/overlays/multivendor/        llm-d (CPU or GPU via kustomization.yaml)  oc apply -k deploy/overlays/multivendor
 deploy/overlays/multivendor-ollama/ Ollama fallback  oc apply -k deploy/overlays/multivendor-ollama
 deploy/overlays/all/                oc apply -k deploy/overlays/all
+deploy/base/aap/                    Optional: AAP + Automation Orchestrator operators and instances
+deploy/overlays/aap/                oc apply -k deploy/overlays/aap
 deploy/gitea/                       Optional in-cluster Gitea
 deploy/argocd/                      Optional OpenShift GitOps bootstrap
 Containerfile         UBI9 Python 3.12 image shared by all components
@@ -112,6 +115,7 @@ src/                  The code, laid out as in the upstream telco-lab repo so im
   services/smo/ptp_bridge.py             timing plane
   services/orchestrator/nep_orchestrator.py   RCA agent
   extensions/sheldon/agentic/            MCP gateway + plane servers
+ao-remediation/       Optional: AO workflow, AAP playbooks and setup notes for governed remediation
 tests/                e2e_local.py (no cluster), smoke_route.py (deployed), stub_kube.py
 docs/                 deployment, demo walkthrough, architecture, reference; diagrams/ (LaTeX sequence diagrams: overview + detailed)
 ```

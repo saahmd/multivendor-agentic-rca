@@ -40,6 +40,7 @@ spec:
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
           envFrom:
             - secretRef: { name: llm-endpoint, optional: true }
+            - secretRef: { name: ao-webhook, optional: true }   # AO_URL, AO_CLIENT_ID, AO_CLIENT_SECRET, AO_WEBHOOK_PATH
           ports: [{ name: http, containerPort: 7095 }]
           readinessProbe:
             httpGet: { path: /nep/health, port: 7095 }

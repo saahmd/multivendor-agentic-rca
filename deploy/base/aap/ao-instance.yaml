@@ -1,0 +1,56 @@
+# Automation Orchestrator instance. Applied after the AO operator CSV (wave 5) and AAP (wave 10).
+# The shape follows the operator's alm-example (spec.postgres.*, spec.ingress). The key names inside
+# the two DB secrets: the keys host/port/database/username/password were confirmed from the operator's
+# migration jobs. Both secrets point at the `postgresql` Service in this namespace and reuse the `ao`
+# credentials from the `postgresql` Secret (ao-postgres.yaml).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: backend-db-secret
+  namespace: aap
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+stringData:
+  host: postgresql
+  port: "5432"
+  database: ao_backend
+  username: ao
+  password: FaultManagement1234
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: temporal-db-secret
+  namespace: aap
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+stringData:
+  host: postgresql
+  port: "5432"
+  database: ao_temporal
+  username: ao
+  password: FaultManagement1234
+---
+apiVersion: aap.ansible.com/v1alpha1
+kind: AutomationOrchestrator
+metadata:
+  name: automation-orchestrator
+  namespace: aap
+  annotations:
+    argocd.argoproj.io/sync-wave: "15"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  ingress:
+    type: Route
+  postgres:
+    host: postgresql
+    port: 5432
+    # TODO(verify): the alm-example uses sslMode "require" with a CA secret. This lab Postgres has no
+    # TLS, so "disable" is used here; if AO rejects it, add TLS to ao-postgres.yaml and set caCertSecretRef.
+    sslMode: disable
+    backendDatabase:
+      secretRef:
+        name: backend-db-secret
+    temporalDatabase:
+      secretRef:
+        name: temporal-db-secret

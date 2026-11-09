@@ -36,7 +36,7 @@ The NIC plane is **emulated**: the lab has no Intel E810, so its counters are ge
 
 ## Honest limits
 
-- **Nothing is executed.** APPLY means only "eligible for automation"; the lab has no remediation or approval workflow. Heal is a button.
+- **NEP executes nothing.** APPLY means only "eligible for automation". Remediation is either the Heal button or, with the optional Automation Orchestrator flow, an AO approval followed by an AAP job. NEP's table still makes the decision.
 - With ACM absent, APPLY is unreachable in this lab: at most 2 real planes can agree.
 - The table is small and hand-written; it knows the signals these four tools emit, nothing else.
 - An LLM narrative may paraphrase the verdict loosely ("remediation triggered"). The audit record is the source of truth.

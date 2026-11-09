@@ -98,12 +98,14 @@ Tips: Worth mentioning on the UI:
 - The DU alarm follows from the lock the console applied during Inject (see section 3). The PTP plane is the one that observes the fault directly.
 - The **O-Cloud plane** is real only with ACM. Without it, it says it's unavailable, and it doesn't count toward the decision.
 - **CAPIF in this lab issues unsigned tokens.** The exchange and scoping are real, but the security boundary is the namespace NetworkPolicy, not the token.
-- The verdicts are `APPLY (auto-eligible)`, `HOLD — below the bar, needs human approval` and `NO ACTION — no fault signals`. **Nothing is executed automatically, and the lab has no approval workflow.** Remediation in this demo is the Heal button.
+- The verdicts are `APPLY (auto-eligible)`, `HOLD — below the bar, needs human approval` and `NO ACTION — no fault signals`. **The orchestrator never executes anything itself.** Without Automation Orchestrator, remediation is the Heal button. With it, a person approves in AO and an AAP job runs the heal.
 - An LLM narrative may say remediation was "triggered" or "approved". It's paraphrasing the verdict; the audit record is the source of truth.
 
 ## 5. Heal and re-check (2 minutes)
 
-**Click** **Heal Timing**.
+**Governed path (optional, needs Automation Orchestrator, see [ao-remediation](../ao-remediation/README.md)).** After **Run 4-Plane Agentic RCA**, the span list in the RCA panel includes `Automation.AO.Handoff` with status `OK`, because span 7 handed the `HOLD` verdict to AO (its `ao.executionId` is in the raw JSON). The console doesn't link to AO, so open the AO UI in another tab: the execution is waiting at **Approve PTP heal + cell unlock**, with the agent's plain-language brief. **Approve** it. AAP runs `RAN - Heal PTP Timing`, which makes the same call as the Heal button, so the log shows the same lines below. The workflow then re-runs the RCA, which finds no fault, and ends on **Close RCA**. **Reject** it instead to show `Record rejection` and no action.
+
+**Manual path.** **Click** **Heal Timing**.
 
 **What appears:** `PTP-BRIDGE: … lock_state=LOCKED offset=0 ns`, `O1: … administrativeState=UNLOCKED`. Cell `ACTIVE`, alarm `None`, pill `RAN RUNNING & LOCKED`.
 

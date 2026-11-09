@@ -1,0 +1,17 @@
+---
+- name: RAN - Escalate
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    trace_id: "{{ original_trace_id | default('unknown') }}"
+    decision: "{{ verify_decision | default('unknown') }}"
+
+  tasks:
+    # Placeholder for the lab: a real deployment would open a ticket or page on-call here
+    # (ServiceNow, Mattermost, PagerDuty). The job failing makes the escalation visible in AO.
+    - name: Escalate - heal did not clear the fault
+      ansible.builtin.fail:
+        msg: >-
+          ESCALATION: RCA {{ trace_id }} still reports a fault after the heal
+          (verification decision: {{ decision }}). Manual intervention required.

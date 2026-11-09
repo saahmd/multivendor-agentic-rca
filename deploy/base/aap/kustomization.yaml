@@ -1,0 +1,15 @@
+# AAP + Automation Orchestrator via operators. Apply via the overlay:  oc apply -k deploy/overlays/aap
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - subscriptions.yaml
+  - aap-instance.yaml
+  - ao-postgres.yaml
+  - ao-instance.yaml
+  - bootstrap-job.yaml
+configMapGenerator:
+  - name: aap-bootstrap-script
+    namespace: aap
+    files:
+      - bootstrap/bootstrap_aap.py

@@ -1,0 +1,309 @@
+{
+  "schema_version": "2.0.0",
+  "name": "RAN Timing Fault - Governed Remediation",
+  "description": "NEP's deterministic RCA verdict arrives by webhook. A task agent explains it to the approver, the switch branches on the verdict, a human approves, and AAP heals PTP timing and verifies the result.",
+  "triggers": [
+    {
+      "id": "trigger_webhook",
+      "type": "webhook_trigger",
+      "name": "RCA Concluded",
+      "parameters": {
+        "webhook_path": "ran-rca-concluded",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "traceId",
+            "verdict",
+            "faultClass"
+          ],
+          "properties": {
+            "eventId": {
+              "type": "string"
+            },
+            "traceId": {
+              "type": "string"
+            },
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "APPLY",
+                "HOLD",
+                "NO_ACTION"
+              ],
+              "description": "Machine verdict from NEP"
+            },
+            "decision": {
+              "type": "string"
+            },
+            "faultClass": {
+              "type": "string"
+            },
+            "signal": {
+              "type": "string"
+            },
+            "corroboration": {
+              "type": "string"
+            },
+            "planes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "evidence": {
+              "type": "array"
+            },
+            "llmNarrative": {
+              "type": "string"
+            },
+            "target": {
+              "type": "object",
+              "properties": {
+                "cell": {
+                  "type": "string"
+                },
+                "ptpBridge": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "position": {
+        "x": 0,
+        "y": 300
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "id": "verdict_explainer",
+      "type": "agentic",
+      "name": "Verdict Explainer",
+      "parameters": {
+        "prompt": "You are briefing a human approver for a RAN timing fault. A deterministic RCA engine (NEP) has already decided the verdict. Do NOT re-diagnose and do NOT change the verdict. Explain it in plain language.\n\nRCA result:\n- Verdict: ${trigger.verdict} (${trigger.decision})\n- Fault class: ${trigger.faultClass}\n- Signal: ${trigger.signal}\n- Corroboration: ${trigger.corroboration} real planes agree (${trigger.planes})\n- Target: cell ${trigger.target.cell}\n- NEP narrative: ${trigger.llmNarrative}\n\nIf approved, the automation will do exactly this and nothing else:\n1. Heal the PTP bridge (restore clock lock).\n2. Unlock the O-DU cell (administrativeState=UNLOCKED) and wait for it to be ACTIVE.\n3. Re-run the RCA to verify the fault is gone.\n\nWrite a short brief for the approver. Output ONLY valid JSON:\n{\n  \"what_failed\": \"one or two plain-language sentences\",\n  \"why_hold\": \"why the verdict needs a human (planes agreeing, what is not counted)\",\n  \"if_approved\": \"what the three steps above will do\",\n  \"check_after\": \"what the approver should see when it worked\"\n}",
+        "tool_selection_strategy": "NONE",
+        "response_schema": {
+          "type": "object",
+          "properties": {
+            "what_failed": {
+              "type": "string"
+            },
+            "why_hold": {
+              "type": "string"
+            },
+            "if_approved": {
+              "type": "string"
+            },
+            "check_after": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "position": {
+        "x": 300,
+        "y": 300
+      }
+    },
+    {
+      "id": "verdict_switch",
+      "type": "switch",
+      "name": "NEP Verdict",
+      "parameters": {
+        "cases": [
+          {
+            "port": "case_0",
+            "label": "APPLY",
+            "condition": "${trigger.verdict} == 'APPLY'"
+          },
+          {
+            "port": "case_1",
+            "label": "HOLD (needs approval)",
+            "condition": "${trigger.verdict} == 'HOLD'"
+          }
+        ],
+        "default_port": "default"
+      },
+      "position": {
+        "x": 640,
+        "y": 300
+      }
+    },
+    {
+      "id": "approval_heal",
+      "type": "approval",
+      "name": "Approve PTP heal + cell unlock",
+      "parameters": {
+        "prompt": "Approve PTP heal + cell unlock?\n\nWhat failed: ${verdict_explainer.output.what_failed}\nWhy HOLD: ${verdict_explainer.output.why_hold}\nIf approved: ${verdict_explainer.output.if_approved}\nCheck after: ${verdict_explainer.output.check_after}\n\nNEP trace: ${trigger.traceId}"
+      },
+      "position": {
+        "x": 980,
+        "y": 300
+      }
+    },
+    {
+      "id": "record_rejection",
+      "type": "aap_job_template",
+      "name": "Record rejection / open incident",
+      "parameters": {
+        "diff_mode": false,
+        "job_template_name": "RAN - Record Rejection",
+        "organization_name": "Default",
+        "extra_vars": {
+          "original_trace_id": "${trigger.traceId}",
+          "fault_class": "${trigger.faultClass}",
+          "signal": "${trigger.signal}"
+        }
+      },
+      "settings": {},
+      "position": {
+        "x": 1320,
+        "y": 520
+      }
+    },
+    {
+      "id": "heal_ptp",
+      "type": "aap_job_template",
+      "name": "RAN - Heal PTP Timing",
+      "parameters": {
+        "diff_mode": false,
+        "job_template_name": "RAN - Heal PTP Timing",
+        "organization_name": "Default"
+      },
+      "settings": {},
+      "position": {
+        "x": 1320,
+        "y": 200
+      }
+    },
+    {
+      "id": "wait_settle",
+      "type": "wait",
+      "name": "Wait 10 s",
+      "parameters": {
+        "duration": 10
+      },
+      "position": {
+        "x": 1660,
+        "y": 200
+      }
+    },
+    {
+      "id": "verify_rca",
+      "type": "http_request",
+      "name": "Verification RCA",
+      "parameters": {
+        "method": "POST",
+        "url": "http://nep-orchestrator.multivendor-rca.svc:7095/nep/rca/trigger?trigger=ao-verify",
+        "body": {}
+      },
+      "position": {
+        "x": 1900,
+        "y": 200
+      }
+    },
+    {
+      "id": "verify_check",
+      "type": "condition",
+      "name": "Fault cleared?",
+      "parameters": {
+        "condition": "${verify_rca.body.event.verdict} == 'NO_ACTION'"
+      },
+      "position": {
+        "x": 2200,
+        "y": 200
+      }
+    },
+    {
+      "id": "close_rca",
+      "type": "aap_job_template",
+      "name": "RAN - Close RCA",
+      "parameters": {
+        "diff_mode": false,
+        "job_template_name": "RAN - Close RCA",
+        "organization_name": "Default",
+        "extra_vars": {
+          "original_trace_id": "${trigger.traceId}"
+        }
+      },
+      "settings": {},
+      "position": {
+        "x": 2500,
+        "y": 80
+      }
+    },
+    {
+      "id": "escalate",
+      "type": "aap_job_template",
+      "name": "RAN - Escalate",
+      "parameters": {
+        "diff_mode": false,
+        "job_template_name": "RAN - Escalate",
+        "organization_name": "Default",
+        "extra_vars": {
+          "original_trace_id": "${trigger.traceId}",
+          "verify_decision": "${verify_rca.body.event.decision}"
+        }
+      },
+      "settings": {},
+      "position": {
+        "x": 2500,
+        "y": 320
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "trigger_webhook",
+      "to": "verdict_explainer"
+    },
+    {
+      "from": "verdict_explainer",
+      "to": "verdict_switch"
+    },
+    {
+      "from": "verdict_switch",
+      "to": "heal_ptp",
+      "from_port": "case_0"
+    },
+    {
+      "from": "verdict_switch",
+      "to": "approval_heal",
+      "from_port": "case_1"
+    },
+    {
+      "from": "approval_heal",
+      "to": "heal_ptp",
+      "from_port": "approved"
+    },
+    {
+      "from": "approval_heal",
+      "to": "record_rejection",
+      "from_port": "rejected"
+    },
+    {
+      "from": "heal_ptp",
+      "to": "wait_settle"
+    },
+    {
+      "from": "wait_settle",
+      "to": "verify_rca"
+    },
+    {
+      "from": "verify_rca",
+      "to": "verify_check"
+    },
+    {
+      "from": "verify_check",
+      "to": "close_rca",
+      "from_port": "true"
+    },
+    {
+      "from": "verify_check",
+      "to": "escalate",
+      "from_port": "false"
+    }
+  ]
+}

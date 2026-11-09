@@ -1,0 +1,38 @@
+---
+- name: RAN - Heal PTP Timing
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    base_url: "{{ sandbox_url | default('http://ran-sandbox-controller.multivendor-rca.svc:7098') }}"
+    retries_n: "{{ poll_retries | default(12) }}"
+    delay_s: "{{ poll_delay | default(5) }}"
+
+  tasks:
+    # Same call as the console's Heal Timing button, so the console log shows the same
+    # PTP-BRIDGE and O1 lines.
+    - name: Heal PTP and unlock the cell (same as the Heal Timing button)
+      ansible.builtin.uri:
+        url: "{{ base_url }}/api/ran/heal-ptp"
+        method: POST
+        body_format: json
+        body: {}
+        status_code: [200]
+      register: heal
+
+    - name: Wait for PTP LOCKED and cell ACTIVE
+      ansible.builtin.uri:
+        url: "{{ base_url }}/api/ran/status"
+        method: GET
+        return_content: true
+        status_code: [200]
+      register: status
+      until: >-
+        status.json.ptp is mapping and status.json.ptp.port_state == 'LOCKED'
+        and status.json.o1 is mapping and status.json.o1.cellState == 'ACTIVE'
+      retries: "{{ retries_n | int }}"
+      delay: "{{ delay_s | int }}"
+
+    - name: Report result
+      ansible.builtin.debug:
+        msg: "PTP {{ status.json.ptp.port_state }}, cell {{ status.json.o1.cellState }}"

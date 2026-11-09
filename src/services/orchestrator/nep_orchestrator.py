@@ -1,10 +1,11 @@
 """
 NEP Orchestrator -- the RCA agent (rApp-style).
 
-POST /nep/rca/trigger runs six spans: O1 alarm + PTP ingest -> CAPIF token (TS 29.222) ->
+POST /nep/rca/trigger runs seven spans: O1 alarm + PTP ingest -> CAPIF token (TS 29.222) ->
 MCP tool fan-out to four evidence planes -> deterministic route table (the ONLY decision
 step; emulated planes never count toward the auto-apply bar) -> optional LLM narration
-(any OpenAI-compatible endpoint; non-decisional) -> TMF688 RcaConcludedEvent.
+(any OpenAI-compatible endpoint; non-decisional) -> TMF688 RcaConcludedEvent -> optional hand-off
+of the verdict to Red Hat Automation Orchestrator (AO), which governs and executes the remediation.
 Traces are kept in memory (/nep/audit/*). Stdlib only.
 """
 import http.server
@@ -35,6 +36,15 @@ LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
 # The Intel NIC plane is EMULATED (no E810 hardware timestamps). follow-ptp: it reports the
 # egress-timestamp fault only while the PTP plane is actually unlocked; always / never pin it.
 NIC_FAULT_MODE = os.environ.get("NIC_FAULT_MODE", "follow-ptp")
+# Automation Orchestrator hand-off (span 7). Unset AO_URL / AO_CLIENT_ID / AO_CLIENT_SECRET = span 7 is
+# SKIPPED and the RCA behaves exactly as before. AO_URL is the AO base URL, e.g. the in-cluster Service.
+AO_URL = os.environ.get("AO_URL", "").rstrip("/")
+AO_WEBHOOK_PATH = os.environ.get("AO_WEBHOOK_PATH", "ran-rca-concluded")   # the workflow trigger's webhook_path
+AO_CLIENT_ID = os.environ.get("AO_CLIENT_ID", "")           # AO service account credential
+AO_CLIENT_SECRET = os.environ.get("AO_CLIENT_SECRET", "")
+AO_TIMEOUT = float(os.environ.get("AO_TIMEOUT", "10"))
+RAN_CELL_ID = os.environ.get("RAN_CELL_ID", "odu-1")        # reported to AO as target.cell
+AO_VERIFY_PREFIX = "ao-verify"                              # runs tagged ?trigger=ao-verify* never go back to AO
 
 ROUTE_TABLE = [
     ("bmh_powered_off", "OC-NodeDown"),
@@ -143,6 +153,69 @@ def _capif_onboard():
         return invoker_id, None, None, f"token request failed (HTTP {code}): {tok.get('error') or tok.get('cause') or tok}"
     except Exception as exc:
         return None, None, None, f"CAPIF unreachable: {exc}"
+
+_AO_CACHE = {}                 # {"token", "exp"}
+_AO_LOCK = threading.Lock()
+
+
+def _ao_token():
+    """Bearer token for the AO webhook (client_credentials, AO service account). Cached until 60 s
+    before it expires, same pattern as the CAPIF token. Returns (token, error)."""
+    with _AO_LOCK:
+        c = _AO_CACHE
+        if c and c["exp"] - time.time() > 60:
+            return c["token"], None
+        code, tok = _req("POST", f"{AO_URL}/api/v1/auth/token",
+                         {"grant_type": "client_credentials", "client_id": AO_CLIENT_ID,
+                          "client_secret": AO_CLIENT_SECRET}, timeout=AO_TIMEOUT)
+        access = tok.get("access_token") if isinstance(tok, dict) else None
+        if code != 200 or not access:
+            _AO_CACHE.clear()
+            detail = tok.get("error") or tok.get("detail") or tok if isinstance(tok, dict) else tok
+            return None, f"AO token request failed (HTTP {code}): {str(detail)[:160]}"
+        exp = time.time() + float(tok["expires_in"]) if tok.get("expires_in") else _jwt_exp(access)
+        _AO_CACHE.update(token=access, exp=exp)
+        return access, None
+
+
+def ao_payload(event):
+    """The AO webhook body: the RCA event's fields, flattened, plus the machine `verdict`."""
+    e = event["event"]
+    return {
+        "eventId": event["eventId"], "traceId": e["traceId"], "verdict": e["verdict"],
+        "decision": e["decision"], "faultClass": e["faultClass"], "signal": e["signal"],
+        "corroboration": e["corroboration"], "planes": e["planes"], "evidence": e["evidence"],
+        "llmNarrative": e["llmNarrative"],
+        "target": {"cell": RAN_CELL_ID, "ptpBridge": urllib.parse.urlparse(PTP_BRIDGE_URL).netloc},
+    }
+
+
+def ao_dispatch(event, trigger):
+    """Hand the concluded RCA to Automation Orchestrator. Never raises: an AO problem must not break
+    the RCA. Returns {"status": DISPATCHED | SKIPPED | ERROR, "executionId", "reason"}."""
+    if not (AO_URL and AO_CLIENT_ID and AO_CLIENT_SECRET):
+        return {"status": "SKIPPED", "reason": "AO not configured (AO_URL / AO_CLIENT_ID / AO_CLIENT_SECRET unset)"}
+    if event["event"]["verdict"] == "NO_ACTION":
+        return {"status": "SKIPPED", "reason": "verdict NO_ACTION"}
+    if str(trigger).startswith(AO_VERIFY_PREFIX):
+        return {"status": "SKIPPED", "reason": "verification run started by AO; not handed back"}
+    try:
+        token, err = _ao_token()
+        if err:
+            return {"status": "ERROR", "reason": err}
+        code, resp = _req("POST", f"{AO_URL}/api/v1/webhooks/{AO_WEBHOOK_PATH}", ao_payload(event),
+                          headers={"Authorization": "Bearer " + token}, timeout=AO_TIMEOUT)
+        if code == 401:
+            with _AO_LOCK:
+                _AO_CACHE.clear()          # token rejected: fetch a new one on the next RCA
+        if code not in (200, 201, 202):
+            detail = resp.get("error") or resp.get("detail") or resp if isinstance(resp, dict) else resp
+            return {"status": "ERROR", "reason": f"AO webhook returned HTTP {code}: {str(detail)[:200]}"}
+        execution_id = next((resp.get(k) for k in ("execution_id", "executionId", "id") if resp.get(k)), None)
+        return {"status": "DISPATCHED", "executionId": execution_id}
+    except Exception as exc:
+        return {"status": "ERROR", "reason": f"{type(exc).__name__}: {exc}"}
+
 
 def mcp_call(token, method, params=None):
     _, resp = _req("POST", f"{MCP_GATEWAY_URL}/mcp",
@@ -378,12 +451,13 @@ def run_rca_analysis(trigger="PTP sync fault (cell unavailable, FREERUN<->LOCKED
     emulated_supporting = sorted(t["plane"] for t in testimony
                                  if t["emulated"] and want_signals & set(t["signals"]))
     meets_bar = len(corroborating_planes) >= bar
+    # `verdict` is the machine-readable form of `decision` (whose text contains an em-dash).
     if fault_class is None:
-        decision = "NO ACTION — no fault signals"
+        decision, verdict = "NO ACTION — no fault signals", "NO_ACTION"
     elif meets_bar:
-        decision = "APPLY (auto-eligible)"
+        decision, verdict = "APPLY (auto-eligible)", "APPLY"
     else:
-        decision = "HOLD — below the bar, needs human approval"
+        decision, verdict = "HOLD — below the bar, needs human approval", "HOLD"
 
     spans.append({
         "spanId": "span-4-deterministic-router",
@@ -398,6 +472,7 @@ def run_rca_analysis(trigger="PTP sync fault (cell unavailable, FREERUN<->LOCKED
             "policy.corroboratingPlanes": sorted(corroborating_planes),
             "policy.emulatedPlanesNotCounted": emulated_supporting,
             "policy.governedDecision": decision,
+            "policy.verdict": verdict,
             "policy.safetyGuarantee": "NO LLM hallucination in decision path"
         }
     })
@@ -439,6 +514,7 @@ def run_rca_analysis(trigger="PTP sync fault (cell unavailable, FREERUN<->LOCKED
             "signal": winning_signal,
             "corroboration": f"{len(corroborating_planes)}/{bar}",
             "decision": decision,
+            "verdict": verdict,
             "planes": sorted(corroborating_planes),
             "evidence": testimony,
             "llmNarrative": llm_output.get("summary")
@@ -456,6 +532,26 @@ def run_rca_analysis(trigger="PTP sync fault (cell unavailable, FREERUN<->LOCKED
             "tmf.eventId": event_id,
             "tmf.traceId": trace_id,
             "tmf.odaCompliance": "Autonomous Networks Level 4 Governance"
+        }
+    })
+
+    # ---------------------------------------------------------
+    # SPAN 7: Hand-off to Automation Orchestrator (governed remediation)
+    # ---------------------------------------------------------
+    span7_start = time.time()
+    ao = ao_dispatch(tmf688_event, trigger)
+    spans.append({
+        "spanId": "span-7-ao-handoff",
+        "name": "Automation.AO.Handoff",
+        "standard": "Red Hat Automation Orchestrator webhook",
+        "duration_ms": round((time.time() - span7_start) * 1000, 2),
+        "status": {"DISPATCHED": "OK", "SKIPPED": "SKIPPED"}.get(ao["status"], "ERROR"),
+        "attributes": {
+            "ao.status": ao["status"],
+            "ao.executionId": ao.get("executionId"),
+            "ao.workflow": AO_WEBHOOK_PATH if ao["status"] != "SKIPPED" else None,
+            "ao.reason": ao.get("reason"),
+            "ao.role": "Governs and executes the NEP verdict; does not change it"
         }
     })
 
@@ -493,6 +589,7 @@ class NEPHandler(http.server.BaseHTTPRequestHandler):
                 "mcp_gateway_url": MCP_GATEWAY_URL,
                 "mlflow_tracking_uri": MLFLOW_URL,
                 "ptp_bridge_url": PTP_BRIDGE_URL,
+                "ao_configured": bool(AO_URL and AO_CLIENT_ID and AO_CLIENT_SECRET),
                 "endpoints": [
                     "/nep/ptp/sync",
                     "/nep/rca/trigger",
@@ -535,8 +632,10 @@ class NEPHandler(http.server.BaseHTTPRequestHandler):
     def _rca(self):
         """Run one RCA. Default reply: its TMF688 event. ?view=full: this run's whole audit trace
         (spans, llmSynthesis) -- race-free, unlike reading /nep/audit/latest afterwards."""
+        # ?trigger=<label> tags the run (AO's verification run sends ao-verify, which is not handed back)
+        label = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("trigger", [None])[0]
         try:
-            trace = run_rca_analysis()
+            trace = run_rca_analysis(label) if label else run_rca_analysis()
         except Exception as exc:
             self._send_json(500, {"error": f"RCA failed: {type(exc).__name__}: {exc}"})
             return

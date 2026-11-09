@@ -30,6 +30,12 @@ flowchart TB
     end
     NEP -. "optional /v1/chat/completions" .-> LLM[("OpenAI-compatible LLM")]
     MO -. "optional kubectl" .-> ACM[("ACM hub")]
+    NEP -. "optional span 7: verdict webhook" .-> AO
+    subgraph aap["OpenShift project: aap (optional)"]
+        AO["Automation Orchestrator"] -- "approved: launch job template" --> AAP["AAP automation controller"]
+    end
+    AO -. "agent explains the verdict" .-> LLM
+    AAP -. "heal-ptp / verification RCA" .-> SB & NEP
 ```
 
 | Component | Code | What it is |
@@ -38,7 +44,8 @@ flowchart TB
 | RAN slice | `src/deploy/docker/launch_slice.py` + `src/tools/stackctl.py` (profile `ran`) | A PID-1 supervisor that boots 32 NFs in dependency tiers and gates each on readiness: 5G core, IMS, and the O-RAN split RAN. |
 | UE | `src/services/ue_sim/ue_sim.py` | RRC setup, then NAS registration with 5G-AKA RES* computed with MILENAGE (TS 35.206 / TS 33.501 A.4), security mode, a PDU session, and user-plane echoes. |
 | Timing plane | `src/services/smo/ptp_bridge.py` | ptp4l-style state (offset, port state, clock class), CloudEvents shape, `/ptp/inject` and `/ptp/heal`. |
-| RCA agent | `src/services/orchestrator/nep_orchestrator.py` | The six-span pipeline below. |
+| RCA agent | `src/services/orchestrator/nep_orchestrator.py` | The seven-span pipeline below. Span 7 (optional) hands the verdict to Automation Orchestrator. |
+| Governed remediation (optional) | `ao-remediation/`, `deploy/base/aap/` | Automation Orchestrator and AAP, installed by their operators. AO holds the approval gate and AAP job templates run the heal. See [Flow 3](#flow-3-governed-remediation-with-automation-orchestrator-optional). |
 | CAPIF | `src/services/core/capif/capif.py` | TS 29.222 provider registration, API publish, invoker onboarding and scoped tokens. Tokens are **unsigned** lab JWTs (`alg: none`). |
 | MCP gateway | `src/extensions/sheldon/agentic/gateway.py` | JSON-RPC MCP front door. It decodes the CAPIF token and checks issuer, expiry and scope (**no signature check**), maps the scope to the allowed tools, and routes by tool name. |
 | MCP planes | `src/extensions/sheldon/agentic/mcp_*.py`, `*_tools.py` | `ocloud` (ACM ManagedClusters), `ran` (O-DU O1), `redhat` (PTP), `intel` (NIC, emulated) |
@@ -108,19 +115,51 @@ sequenceDiagram
     end
     N->>N: deterministic route table → faultClass, corroboration (real planes only), decision
     N-->>L: narrate the evidence (non-decisional)
-    N-->>SB: this run's full trace (TMF688 event + 6 spans)
+    N-->>SB: this run's full trace (TMF688 event + 7 spans)
 ```
 
-## The RCA pipeline (six spans)
+## Flow 3: Governed remediation with Automation Orchestrator (optional)
+
+Off by default. NEP hands the verdict to AO only when `AO_URL`, `AO_CLIENT_ID` and `AO_CLIENT_SECRET` are set (Secret `ao-webhook`). Setup: [ao-remediation/REQUIREMENTS.md](../ao-remediation/REQUIREMENTS.md).
+
+```mermaid
+sequenceDiagram
+    participant N as nep-orchestrator
+    participant AO as Automation Orchestrator
+    participant L as LLM (RHOAI)
+    actor H as Approver
+    participant A as AAP job templates
+    participant SB as sandbox console
+    N->>AO: span 7: POST /api/v1/webhooks/ran-rca-concluded (service-account token)
+    AO-->>N: 202 + execution id
+    AO->>L: task agent explains the verdict (no tools)
+    AO->>AO: switch on NEP's verdict (APPLY / HOLD / other)
+    AO->>H: approval, with the agent's brief
+    alt approved
+        H-->>AO: approve
+        AO->>A: RAN - Heal PTP Timing
+        A->>SB: POST /api/ran/heal-ptp (same call as the Heal button)
+        AO->>N: verification RCA (?trigger=ao-verify, never handed back)
+        AO->>A: Close RCA, or Escalate if the fault is still there
+    else rejected
+        H-->>AO: reject
+        AO->>A: Record rejection / open incident
+    end
+```
+
+The principle is unchanged: **NEP's deterministic route table makes the decision, AO governs and executes it, and the LLM never decides.** The AO switch reads NEP's `verdict` field (`APPLY`, `HOLD` or `NO_ACTION`), not the agent's text. The agent only writes the brief the approver reads. In this demo the verdict is always `HOLD` (2/3), so the approval path is the main path; the `APPLY` branch exists for completeness.
+
+## The RCA pipeline (seven spans)
 
 | # | Span | Input | Output |
 |---|---|---|---|
 | 1 | `O-RAN.O1.FM.Alarm_Ingest` | O-DU `/o1/alarms`, PTP `/ptp` | The alarms and clock state recorded as span attributes. `ERROR` if either is unreachable. |
 | 2 | `3GPP.CAPIF.Security_Authz` | CAPIF | Invoker id and scoped token, onboarded once and reused until 60 s before expiry (`capif.tokenSource: new / cached`). `ERROR` (and no tool calls) if CAPIF fails. |
 | 3 | `O-RAN.R1.MCP_Tool_Execution` | Four tool calls through the gateway | One testimony per plane: `answered`, `emulated`, `signals`, and one line of `evidence` built from the returned data. `PARTIAL` if any plane failed. |
-| 4 | `O-RAN.NonRT_RIC.Deterministic_Router` | All signals | The first matching row of `ROUTE_TABLE` gives `faultClass`. **Non-emulated** planes carrying a signal of that class are counted against a bar of 3 (`corroboration` = counted/bar). The verdict is `APPLY (auto-eligible)` at ≥ 3, `HOLD — below the bar, needs human approval` below it, or `NO ACTION — no fault signals` when nothing matched. Emulated planes that agree are listed in `policy.emulatedPlanesNotCounted`. |
+| 4 | `O-RAN.NonRT_RIC.Deterministic_Router` | All signals | The first matching row of `ROUTE_TABLE` gives `faultClass`. **Non-emulated** planes carrying a signal of that class are counted against a bar of 3 (`corroboration` = counted/bar). The verdict is `APPLY (auto-eligible)` at ≥ 3, `HOLD — below the bar, needs human approval` below it, or `NO ACTION — no fault signals` when nothing matched. The event also carries the same verdict as a machine field, `verdict`: `APPLY`, `HOLD` or `NO_ACTION`. Emulated planes that agree are listed in `policy.emulatedPlanesNotCounted`. |
 | 5 | `Enterprise.AI.LLM_Synthesis` | Decision + testimony | LLM narrative, or a labeled template if there's no LLM (status `FALLBACK`, reason in `llm_error`). **Never feeds back into span 4.** |
 | 6 | `TMForum.TMF688.Audit_Event_Emission` | Everything | `RcaConcludedEvent` stored in `/nep/audit/*` (in memory, last 50). |
+| 7 | `Automation.AO.Handoff` | The event | Optional. POSTs the verdict to Automation Orchestrator and records `ao.status` (`DISPATCHED`, `SKIPPED` or `ERROR`) and `ao.executionId`. `SKIPPED` when AO isn't configured, the verdict is `NO_ACTION`, or the run was tagged `?trigger=ao-verify`. An AO failure never fails the RCA. Changes nothing about the verdict. |
 
 Route table excerpt (`nep_orchestrator.py`), ordered from deepest plane to shallowest:
 
@@ -132,7 +171,7 @@ ptp_offset_exceeded / ptp_not_locked / nic_firmware_suspect / du_sync_loss_alarm
 service_alarm_raised / service_inactive → OC-ServiceDegraded
 ```
 
-The verdict is a label only. The orchestrator executes nothing and the lab has no approval workflow; remediation is the **Heal Timing** button.
+The verdict itself is a label. The orchestrator executes nothing. Without Automation Orchestrator, remediation is the **Heal Timing** button. With it (Flow 3), the verdict starts a governed workflow: an approval, then an AAP job that makes the same heal call.
 
 **What the timing-fault RCA does and doesn't show.** During the injected fault, every plane points at timing, but not independently:
 - The **PTP plane** observes the injected fault directly.

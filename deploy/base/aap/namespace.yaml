@@ -1,0 +1,20 @@
+# AAP and the AO instance live in `aap`. The AO operator only supports AllNamespaces, so it needs
+# an OperatorGroup with no targetNamespaces. A namespace can hold only one OperatorGroup, so it
+# gets its own namespace instead of sharing `aap` with the AAP operator's OwnNamespace group.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aap
+  labels:
+    argocd.argoproj.io/managed-by: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: automation-orchestrator-operator
+  labels:
+    argocd.argoproj.io/managed-by: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"

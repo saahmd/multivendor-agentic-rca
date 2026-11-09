@@ -1,0 +1,146 @@
+# Postgres for Automation Orchestrator, from the user's secret.yaml and deploymentconfig.yaml, moved to
+# the `aap` namespace. AO needs two databases (backend and temporal): the image creates `ao_backend` from
+# the secret and a start script creates `ao_temporal` and `temporal_visibility` for the same user. Lab use only: single replica.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgresql
+  namespace: aap
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+type: Opaque
+stringData:
+  database-user: ao
+  database-password: FaultManagement1234
+  database-name: ao_backend
+  database-host: postgresql
+  database-port: "5432"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgresql
+  namespace: aap
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgresql-init
+  namespace: aap
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  # Mounted at postgresql-start/, not postgresql-init/: the image runs postgresql-init BEFORE it creates
+  # POSTGRESQL_USER, so `CREATE DATABASE ... OWNER` there fails, aborts the first start and leaves a
+  # half-initialised volume ("role does not exist" on every restart). postgresql-start runs on every
+  # start after the user exists, so the script must be idempotent.
+  # The temporal migration job also uses a database named `temporal_visibility` (its default) that is not
+  # in the temporal-db-secret, so it is created here too.
+  10-create-temporal-dbs.sh: |
+    for db in ao_temporal temporal_visibility; do
+      psql -tAc "SELECT 1 FROM pg_database WHERE datname='${db}'" | grep -q 1 \
+        || psql -c "CREATE DATABASE ${db} OWNER ${POSTGRESQL_USER}"
+    done
+---
+apiVersion: apps.openshift.io/v1
+kind: DeploymentConfig
+metadata:
+  name: postgresql
+  namespace: aap
+  labels:
+    app: postgresql
+    app.kubernetes.io/part-of: automation-orchestrator
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  replicas: 1
+  selector:
+    name: postgresql
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        name: postgresql
+    spec:
+      containers:
+        - name: postgresql
+          image: registry.redhat.io/rhel9/postgresql-16:latest
+          ports:
+            - containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRESQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql
+                  key: database-user
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql
+                  key: database-password
+            - name: POSTGRESQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql
+                  key: database-name
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U $POSTGRESQL_USER -d $POSTGRESQL_DATABASE
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          volumeMounts:
+            - name: postgresql-data
+              mountPath: /var/lib/pgsql/data
+            - name: init-sql
+              mountPath: /opt/app-root/src/postgresql-start/
+      volumes:
+        - name: postgresql-data
+          persistentVolumeClaim:
+            claimName: postgresql
+        - name: init-sql
+          configMap:
+            name: postgresql-init
+  triggers:
+    - type: ConfigChange
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql
+  namespace: aap
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  selector:
+    name: postgresql
+  ports:
+    - name: pg
+      port: 5432
+      targetPort: 5432

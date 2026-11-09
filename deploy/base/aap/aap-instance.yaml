@@ -1,0 +1,19 @@
+# AAP with the automation controller only. Waits for the AAP operator CSV (wave 5) before applying.
+# Argo needs SkipDryRunOnMissingResource=true because the CRD does not exist until the operator is up.
+apiVersion: aap.ansible.com/v1alpha1
+kind: AnsibleAutomationPlatform
+metadata:
+  name: aap
+  namespace: aap
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  # TODO(verify on the cluster): `oc explain ansibleautomationplatform.spec` once the operator is
+  # installed. Hub, EDA and Lightspeed are switched off so only the controller and gateway run.
+  hub:
+    disabled: true
+  eda:
+    disabled: true
+  lightspeed:
+    disabled: true
