@@ -8,8 +8,11 @@ resources:
   - ao-postgres.yaml
   - ao-instance.yaml
   - bootstrap-job.yaml
+  - ao-import-job.yaml
+  - ao-network-policy.yaml
 configMapGenerator:
   - name: aap-bootstrap-script
     namespace: aap
     files:
       - bootstrap/bootstrap_aap.py
+      - bootstrap/import_ao_workflow.py

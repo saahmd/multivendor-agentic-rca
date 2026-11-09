@@ -89,6 +89,21 @@ def _req(method, url, body=None, headers=None, timeout=5):
     except Exception as e:                     # transport failure: no HTTP status at all
         return 0, {"error": str(e)}
 
+def _req_form(url, fields, timeout=5):
+    """POST application/x-www-form-urlencoded (what an OAuth 2.0 token endpoint takes). Same return as _req."""
+    req = urllib.request.Request(url, data=urllib.parse.urlencode(fields).encode(), method="POST",
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx(url)) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except Exception:
+            return e.code, {"error": str(e)}
+    except Exception as e:
+        return 0, {"error": str(e)}
+
 def fetch_json(url, timeout=5):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "NEP-Orchestrator/1.0"})
@@ -165,9 +180,10 @@ def _ao_token():
         c = _AO_CACHE
         if c and c["exp"] - time.time() > 60:
             return c["token"], None
-        code, tok = _req("POST", f"{AO_URL}/api/v1/auth/token",
-                         {"grant_type": "client_credentials", "client_id": AO_CLIENT_ID,
-                          "client_secret": AO_CLIENT_SECRET}, timeout=AO_TIMEOUT)
+        # AO's token endpoint is OAuth 2.0 client_credentials and takes a FORM body (a JSON body gets 422)
+        code, tok = _req_form(f"{AO_URL}/api/v1/auth/token",
+                              {"grant_type": "client_credentials", "client_id": AO_CLIENT_ID,
+                               "client_secret": AO_CLIENT_SECRET}, timeout=AO_TIMEOUT)
         access = tok.get("access_token") if isinstance(tok, dict) else None
         if code != 200 or not access:
             _AO_CACHE.clear()

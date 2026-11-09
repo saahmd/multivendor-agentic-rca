@@ -1,0 +1,20 @@
+---
+# AO's own policies let only the OpenShift router reach the UI pods (8080) and only AO's pods reach the backend.
+# NetworkPolicies add up, so this opens the UI to the import Job and nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ao-workflow-import-to-ui
+  namespace: aap
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: automation-orchestrator
+      app.kubernetes.io/component: ui
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: ao-workflow-import }
+      ports:
+        - { protocol: TCP, port: 8080 }

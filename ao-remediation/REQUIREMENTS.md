@@ -34,10 +34,38 @@ The workflow refers to the templates by name, so these names must not change.
 
 ## AO setup
 
-- **LLM integration** (provider "Red Hat AI", OpenAI-compatible) pointing at the llm-d gateway URL. Select it for the `Verdict Explainer` agent after import.
-- **AAP integration** for the job template steps.
-- **Internal URL allowlist** for the REST step: `http://nep-orchestrator.multivendor-rca.svc:7095`.
-- **Service account** (client credentials) for NEP's webhook call. Put its UUID in the trigger's `authorized_service_account_ids` in `ao/ran-timing-remediation.json` (this lab uses service account `sa1`, UUID `8f631e2a-dd19-4190-8018-a09583bea5f9`, which exists only on this cluster). The webhook path is `ran-rca-concluded`, so NEP's `AO_WEBHOOK_PATH` is `ran-rca-concluded`. Its id and secret go into the `ao-webhook` Secret in `multivendor-rca` (`AO_CLIENT_ID`, `AO_CLIENT_SECRET`), together with `AO_URL` and `AO_WEBHOOK_PATH`.
+Manual, in the AO UI, on each new cluster:
+
+1. **Service account** named `nep-orchestrator`, with a credential (client credentials). Keep the client ID and secret: the secret is shown once. Create it **before** the workflow import, because AO rejects a webhook trigger that has no authorized service account (an absent `authorized_service_account_ids` and an empty list were both rejected by AO's workflow validator). A different name works if you set `AO_SERVICE_ACCOUNT_NAME` in `deploy/base/aap/ao-import-job.yaml`.
+2. **LLM integration** (provider "Red Hat AI", OpenAI-compatible) pointing at the llm-d gateway URL.
+3. **AAP integration** for the job template steps.
+4. **Internal URL allowlist** for the REST step: `http://nep-orchestrator.multivendor-rca.svc:7095`.
+5. **Open the imported workflow** (see below), select the LLM on the `Verdict Explainer` node, and **publish** it.
+6. **The `ao-webhook` Secret** in `multivendor-rca`, then restart NEP (`oc rollout restart deploy/nep-orchestrator -n multivendor-rca`; the env is read at start):
+   - `AO_CLIENT_ID`, `AO_CLIENT_SECRET`: the service account credential from step 1.
+   - `AO_URL`: AO's Route, `https://<host from oc get route automation-orchestrator -n aap>` (no path). Its certificate is trusted by the system CAs, and the call goes through the router, which AO's policies allow. The in-cluster Services are not usable from `multivendor-rca`: the backend (8000) serves TLS and only accepts AO's own pods, and the UI only accepts the router.
+   - `AO_WEBHOOK_PATH=ran-rca-concluded` (the trigger's `webhook_path`).
+
+   AO's token endpoint is OAuth 2.0 `client_credentials` with a form-encoded body; NEP sends it that way.
+
+### Workflow import (GitOps)
+
+The `mvrca-aap` Argo CD Application runs a second PostSync Job, `ao-workflow-import` (`deploy/base/aap/bootstrap/import_ao_workflow.py`). It logs in as the AO local admin (the operator's `automation-orchestrator-initial-admin-password` Secret; the username `admin` is an assumption) and:
+
+- finds the service account from step 1 by name and writes its UUID into the webhook trigger. The repo JSON deliberately holds no UUID, since it differs on every cluster.
+- fetches `ao-remediation/ao/ran-timing-remediation.json` from the Gitea repo and creates the workflow **as a draft** in the service account's AO project.
+- skips with a `SKIPPED` log line and exit 0 if the service account does not exist yet. Create it, then **sync the application again** in Argo CD.
+- never overwrites an existing workflow, so the LLM you select and any edits survive later syncs. To re-import after changing the JSON, delete the workflow in AO and sync again.
+- does not publish (the LLM is chosen by hand, step 5).
+- bakes in the service account's UUID at import time. **If you delete and recreate the service account afterwards** (for example to get a new secret; rotating the credential keeps the account and its UUID), the workflow still lists the old UUID and publishing fails with `Service account(s) not found in this project: <old uuid>`. Fix it in the workflow's webhook trigger by removing the old account and keeping the new one, or delete the workflow and sync again.
+
+Check it with `oc logs job/ao-workflow-import -n aap`. A small NetworkPolicy (`ao-workflow-import-to-ui`) lets only that Job reach the AO UI Service, since AO's own policies admit only the OpenShift router. Without Argo CD, `oc apply -k deploy/overlays/aap` runs it as an ordinary Job. To import by hand instead, add the UUID to a copy of the file and import that:
+
+```bash
+SA_ID=<uuid of the service account>
+jq --arg id "$SA_ID" '.triggers[0].parameters.authorized_service_account_ids = [$id]' \
+   ao/ran-timing-remediation.json > /tmp/ran-timing-remediation.json
+```
 
 ## Network
 

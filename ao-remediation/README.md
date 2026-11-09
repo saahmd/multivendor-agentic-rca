@@ -26,7 +26,7 @@ aap/playbooks/
   ran_escalate.yml                  Fails visibly when the fault is still present after the heal
   ran_record_rejection.yml          Records a rejected remediation
 workflow.mermaid                    Flow diagram
-../deploy/base/aap/bootstrap/       Script that creates the AAP project, inventory and job templates (run by a GitOps Job)
+../deploy/base/aap/bootstrap/       Scripts run by GitOps Jobs: create the AAP project, inventory and job templates; import the AO workflow
 REQUIREMENTS.md                     Prerequisites, job templates, integrations
 ```
 
@@ -38,7 +38,7 @@ The heal runs straight after approval and assumes the fault is still present. Th
 
 ## Setup
 
-GitOps (`mvrca-aap`) installs the AAP and AO operators and instances and creates the AAP project and job templates. The AO side is still manual: the LLM and AAP integrations, the service account, the internal-URL allowlist, and importing and publishing `ao/ran-timing-remediation.json`. Details in [REQUIREMENTS.md](REQUIREMENTS.md).
+GitOps (`mvrca-aap`) installs the AAP and AO operators and instances, creates the AAP project and job templates, and imports the workflow into AO as a draft. Still manual, in the AO UI: the service account (named `nep-orchestrator`, created before the import), the LLM and AAP integrations, the internal-URL allowlist, selecting the LLM on the workflow and publishing it, and the `ao-webhook` Secret for NEP. Details in [REQUIREMENTS.md](REQUIREMENTS.md).
 
 ## Running the demo
 

@@ -1,0 +1,53 @@
+# Imports the RAN remediation workflow into Automation Orchestrator (bootstrap/import_ao_workflow.py).
+# Same hook mechanics as aap-bootstrap (bootstrap-job.yaml): an Argo CD PostSync hook, recreated each sync;
+# with a plain `oc apply -k` it is an ordinary Job (delete it before re-applying).
+#
+# Manual prerequisites, by design:
+#   - an AO service account named `nep-orchestrator` (AO UI), created before or after the first sync. If it is
+#     missing the Job logs SKIPPED and exits 0; create it, then sync the application again.
+#   - the LLM: the workflow is imported as a draft. Select the LLM on the Verdict Explainer node and publish in the AO UI.
+# The Job never overwrites an existing workflow, so those manual choices survive later syncs.
+#
+# Credentials: the AO operator's initial admin Secret. The username is assumed to be `admin` (change AO_ADMIN_USER).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ao-workflow-import
+  namespace: aap
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels: { app: ao-workflow-import }     # matched by the NetworkPolicy below
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: import
+          image: registry.access.redhat.com/ubi9/python-312:latest
+          command: ["python3", "-I", "/scripts/import_ao_workflow.py"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities: { drop: [ALL] }
+            seccompProfile: { type: RuntimeDefault }
+          env:
+            # The AO UI Service; its nginx also serves /api/v1. The Route is not used, so nothing here depends on the cluster.
+            - { name: AO_URL, value: "http://automation-orchestrator-ui.aap.svc.cluster.local" }
+            - { name: AO_ADMIN_USER, value: "admin" }
+            - { name: AO_SERVICE_ACCOUNT_NAME, value: "nep-orchestrator" }
+            # The workflow JSON, from this repo in the in-cluster Gitea. Change with the repo or branch.
+            - { name: WORKFLOW_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000/gitadmin/multivendor-agentic-rca/raw/branch/main/ao-remediation/ao/ran-timing-remediation.json" }
+            - name: AO_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: automation-orchestrator-initial-admin-password, key: password } }
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+      volumes:
+        - name: scripts
+          configMap: { name: aap-bootstrap-script }
