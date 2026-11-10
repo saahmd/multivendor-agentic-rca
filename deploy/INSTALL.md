@@ -81,7 +81,7 @@ Keep watching until `mvrca-sandbox` is **Synced** (OpenShift AI continues in the
 oc get applications.argoproj.io -n openshift-gitops
 ```
 
-You should see `mvrca-platform`, `mvrca-operators`, `mvrca-gpu-operator`, `mvrca-connectivity-link`, and `mvrca-sandbox`. Do not go to step 5 until `mvrca-sandbox` is Synced — that is when the `mvrca` BuildConfig exists. NFD + NVIDIA GPU Operator come from `mvrca-gpu-operator` (needed before `llama-31-8b-llmisvc-gpu.yaml` can schedule).
+You should see `mvrca-platform`, `mvrca-operators`, `mvrca-gpu-operator`, `mvrca-connectivity-link`, `mvrca-aap`, and `mvrca-sandbox`. Do not go to step 5 until `mvrca-sandbox` is Synced — that is when the `mvrca` BuildConfig exists. NFD + NVIDIA GPU Operator come from `mvrca-gpu-operator` (needed before `llama-31-8b-llmisvc-gpu.yaml` can schedule).
 
 ## 5. Build the demo image
 
@@ -124,7 +124,52 @@ oc get llminferenceservice llama-31-8b -n multivendor-rca
 oc get pods -n multivendor-rca | grep llama-31-8b
 ```
 
-## 7. Check
+## 7. Governed remediation with Automation Orchestrator (optional)
+
+`mvrca-aap` installs AAP and Automation Orchestrator (AO), creates the AAP project and job templates (`aap-bootstrap` Job), and imports the workflow into AO as a draft (`ao-workflow-import` Job). A few things stay manual: they hold credentials or are chosen per cluster. Details: [ao-remediation/REQUIREMENTS.md](../ao-remediation/REQUIREMENTS.md).
+
+Wait for AAP and AO, then log in to AO (user `admin`):
+
+```bash
+oc get ansibleautomationplatform,automationorchestrator -n aap
+oc logs job/aap-bootstrap -n aap | tail -3
+oc get route automation-orchestrator -n aap -o jsonpath='https://{.spec.host}{"\n"}'
+oc get secret automation-orchestrator-initial-admin-password -n aap -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+In the AO UI, in this order:
+
+1. **Service account** named `nep-orchestrator`, with a credential. Save the **client ID and secret** (the secret is shown once). Rotate the credential if you lose it; do not delete the account.
+2. **Import the workflow:** sync `mvrca-aap` in Argo CD, then check `oc logs job/ao-workflow-import -n aap` says `created as a draft`. It skips with `SKIPPED` if step 1 isn't done.
+3. **LLM integration in AO UI:** provider *Red Hat AI* (OpenAI-compatible), your LLM base URL and key.
+4. **Allow the AAP host on AO** (before the AAP integration; not GitOps-managed, and it restarts the pods). Set it on all three AO deployments, not just the backend:
+
+   ```bash
+   oc set env \
+     deployment/automation-orchestrator-backend \
+     deployment/automation-orchestrator-worker \
+     deployment/automation-orchestrator-background-worker \
+     -n aap \
+     'APP_INTEGRATION_URL_ALLOWED_HOSTS=["aap.aap.svc"]'
+   ```
+
+5. **AAP integration in AO:** base URL `http://aap.aap.svc` (not `.svc.cluster.local`, which AO blocks), **Allow HTTP** on, and a basic-auth credential: user `admin`, password from `oc get secret aap-admin-password -n aap -o jsonpath='{.data.password}' | base64 -d`.
+6. **Publish the workflow:** open *RAN Timing Fault - Governed Remediation*, select the LLM on the **Verdict Explainer** node, publish.
+
+Then tell NEP where AO is. This Secret holds credentials, so it is not in Git (use the client ID and secret from step 1):
+
+```bash
+oc create secret generic ao-webhook -n multivendor-rca \
+  --from-literal=AO_URL="https://$(oc get route automation-orchestrator -n aap -o jsonpath='{.spec.host}')" \
+  --from-literal=AO_WEBHOOK_PATH=ran-rca-concluded \
+  --from-literal=AO_CLIENT_ID=<client id> \
+  --from-literal=AO_CLIENT_SECRET=<client secret>
+oc rollout restart deploy/nep-orchestrator -n multivendor-rca
+```
+
+Test: in the demo, Start RAN, Inject Fault, Run RCA. The `Automation.AO.Handoff` span shows `DISPATCHED` and an execution waits for approval in AO. If it shows `ERROR`, the span's `ao.reason` says why.
+
+## 8. Check
 
 ```bash
 oc get pods -n multivendor-rca
