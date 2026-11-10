@@ -1,9 +1,8 @@
 flowchart LR
     T([Webhook: RCA Concluded]) --> A[Task agent: Verdict Explainer]
     A --> S{Switch: NEP verdict}
-    S -- APPLY --> H
-    S -- HOLD --> P[/Approval: heal PTP + unlock cell/]
-    S -- other --> E1([end])
+    S -- HOLD or APPLY --> P[/Approval: heal PTP + unlock cell/]
+    S -- NO_ACTION --> E1([end])
     P -- approved --> H[AAP JT: RAN - Heal PTP Timing]
     P -- rejected --> R[AAP JT: Record rejection / open incident] --> E2([end])
     H --> W[Wait 10 s] --> V[REST: verification RCA]

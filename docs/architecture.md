@@ -133,7 +133,7 @@ sequenceDiagram
     N->>AO: span 7: POST /api/v1/webhooks/ran-rca-concluded (service-account token)
     AO-->>N: 202 + execution id
     AO->>L: task agent explains the verdict (no tools)
-    AO->>AO: switch on NEP's verdict (APPLY / HOLD / other)
+    AO->>AO: switch on NEP's verdict (anything but NO_ACTION needs approval)
     AO->>H: approval, with the agent's brief
     alt approved
         H-->>AO: approve
@@ -147,7 +147,7 @@ sequenceDiagram
     end
 ```
 
-The principle is unchanged: **NEP's deterministic route table makes the decision, AO governs and executes it, and the LLM never decides.** The AO switch reads NEP's `verdict` field (`APPLY`, `HOLD` or `NO_ACTION`), not the agent's text. The agent only writes the brief the approver reads. In this demo the verdict is always `HOLD` (2/3), so the approval path is the main path; the `APPLY` branch exists for completeness.
+The principle is unchanged: **NEP's deterministic route table makes the decision, AO governs and executes it, and the LLM never decides.** The AO switch reads NEP's `verdict` field (`APPLY`, `HOLD` or `NO_ACTION`), not the agent's text. The agent only writes the brief the approver reads. In this demo the verdict is always `HOLD` (2/3), so the approval path is the main path; `APPLY` would be routed through the same approval, since the workflow has no automatic-heal path.
 
 ## The RCA pipeline (seven spans)
 

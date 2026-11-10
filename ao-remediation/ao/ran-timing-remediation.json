@@ -82,7 +82,7 @@
       "type": "agentic",
       "name": "Verdict Explainer",
       "parameters": {
-        "prompt": "You are briefing a human approver for a RAN timing fault. A deterministic RCA engine (NEP) has already decided the verdict. Do NOT re-diagnose and do NOT change the verdict. Explain it in plain language.\n\nRCA result:\n- Verdict: ${trigger.verdict} (${trigger.decision})\n- Fault class: ${trigger.faultClass}\n- Signal: ${trigger.signal}\n- Corroboration: ${trigger.corroboration} real planes agree (${trigger.planes})\n- Target: cell ${trigger.target.cell}\n- NEP narrative: ${trigger.llmNarrative}\n\nIf approved, the automation will do exactly this and nothing else:\n1. Heal the PTP bridge (restore clock lock).\n2. Unlock the O-DU cell (administrativeState=UNLOCKED) and wait for it to be ACTIVE.\n3. Re-run the RCA to verify the fault is gone.\n\nWrite a short brief for the approver. Output ONLY valid JSON:\n{\n  \"what_failed\": \"one or two plain-language sentences\",\n  \"why_hold\": \"why the verdict needs a human (planes agreeing, what is not counted)\",\n  \"if_approved\": \"what the three steps above will do\",\n  \"check_after\": \"what the approver should see when it worked\"\n}",
+        "prompt": "You are briefing a human approver for a RAN timing fault. A deterministic RCA engine (NEP) has already decided the verdict. Do NOT re-diagnose and do NOT change the verdict. Explain it in plain language.\n\nRCA result:\n- Verdict: ${trigger.verdict} (${trigger.decision})\n- Fault class: ${trigger.faultClass}\n- Signal: ${trigger.signal}\n- Corroboration: ${trigger.corroboration} real planes agree (${trigger.planes})\n- Target: cell ${trigger.target.cell}\n- NEP narrative: ${trigger.llmNarrative}\n\nIf approved, the automation will do exactly this and nothing else:\n1. Heal the PTP bridge (restore clock lock).\n2. Unlock the O-DU cell (administrativeState=UNLOCKED) and wait for it to be ACTIVE.\n3. Re-run the RCA to verify the fault is gone.\n\nWrite a short brief for the approver. Output ONLY valid JSON, with exactly these four fields at the top level and no wrapper key:\n{\n  \"what_failed\": \"one or two plain-language sentences\",\n  \"why_hold\": \"why the verdict needs a human (planes agreeing, what is not counted)\",\n  \"if_approved\": \"what the three steps above will do\",\n  \"check_after\": \"what the approver should see when it worked\"\n}",
         "tool_selection_strategy": "NONE",
         "response_schema": {
           "type": "object",
@@ -99,7 +99,14 @@
             "check_after": {
               "type": "string"
             }
-          }
+          },
+          "required": [
+            "what_failed",
+            "why_hold",
+            "if_approved",
+            "check_after"
+          ],
+          "additionalProperties": false
         }
       },
       "position": {
@@ -115,13 +122,8 @@
         "cases": [
           {
             "port": "case_0",
-            "label": "APPLY",
-            "condition": "${trigger.verdict} == 'APPLY'"
-          },
-          {
-            "port": "case_1",
-            "label": "HOLD (needs approval)",
-            "condition": "${trigger.verdict} == 'HOLD'"
+            "label": "Needs remediation (HOLD or APPLY)",
+            "condition": "${trigger.verdict} != 'NO_ACTION'"
           }
         ],
         "default_port": "default"
@@ -136,7 +138,7 @@
       "type": "approval",
       "name": "Approve PTP heal + cell unlock",
       "parameters": {
-        "prompt": "Approve PTP heal + cell unlock?\n\nWhat failed: ${verdict_explainer.output.what_failed}\nWhy HOLD: ${verdict_explainer.output.why_hold}\nIf approved: ${verdict_explainer.output.if_approved}\nCheck after: ${verdict_explainer.output.check_after}\n\nNEP trace: ${trigger.traceId}"
+        "prompt": "Approve PTP heal + cell unlock?\n\nWhat failed: ${verdict_explainer.result.content.what_failed}\nWhy HOLD: ${verdict_explainer.result.content.why_hold}\nIf approved: ${verdict_explainer.result.content.if_approved}\nCheck after: ${verdict_explainer.result.content.check_after}\n\nNEP trace: ${trigger.traceId}"
       },
       "position": {
         "x": 980,
@@ -265,13 +267,8 @@
     },
     {
       "from": "verdict_switch",
-      "to": "heal_ptp",
-      "from_port": "case_0"
-    },
-    {
-      "from": "verdict_switch",
       "to": "approval_heal",
-      "from_port": "case_1"
+      "from_port": "case_0"
     },
     {
       "from": "approval_heal",

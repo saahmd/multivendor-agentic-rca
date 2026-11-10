@@ -38,8 +38,10 @@ Manual, in the AO UI, on each new cluster:
 
 1. **Service account** named `nep-orchestrator`, with a credential (client credentials). Keep the client ID and secret: the secret is shown once. Create it **before** the workflow import, because AO rejects a webhook trigger that has no authorized service account (an absent `authorized_service_account_ids` and an empty list were both rejected by AO's workflow validator). A different name works if you set `AO_SERVICE_ACCOUNT_NAME` in `deploy/base/aap/ao-import-job.yaml`.
 2. **LLM integration** (provider "Red Hat AI", OpenAI-compatible) pointing at the llm-d gateway URL.
-3. **AAP integration** for the job template steps.
-4. **Internal URL allowlist** for the REST step: `http://nep-orchestrator.multivendor-rca.svc:7095`.
+3. **AAP integration** for the job template steps. In-cluster, set the base URL to **`http://aap.aap.svc`** and turn on the integration's allow-HTTP setting. Use exactly that short form: AO's SSRF check rejects any hostname ending in `.svc.cluster.local` as "Kubernetes internal DNS", even when it is in the allow-list and allow-HTTP is on, so `http://aap.aap.svc.cluster.local` always fails with `base_url must not resolve to a private, reserved, or cloud metadata address`. The short name resolves the same way from inside the cluster. The base URL is scheme and host only (no path), and the `aap` Service listens on port 80 only, so use `http://`, not `https://`. Alternatively use AAP's Route, `https://<host from oc get route aap -n aap>`, which needs neither allow-HTTP nor an allow-list.
+4. **Allow-lists for internal URLs.** AO also blocks hosts that resolve to private IP ranges. Two separate lists, hostnames only, no scheme or port:
+   - **Workflow HTTP requests** (the verification RCA step): `workflowHttpRequestAllowedHosts` in the AutomationOrchestrator resource, set to `nep-orchestrator.multivendor-rca.svc` in `deploy/base/aap/ao-instance.yaml`. Nothing to do by hand. Use the short `.svc` form here too, for the same `.svc.cluster.local` reason.
+   - **Integrations** (the AAP integration): `APP_INTEGRATION_URL_ALLOWED_HOSTS`, a JSON array on the AO backend, e.g. `["aap.aap.svc"]`. The AutomationOrchestrator resource has no field for it on AO 2026.8, so it has to be set on the backend Deployment, which is not GitOps-managed. It is only needed when the cluster's Service network is in a private range. On a cluster whose Services are in `172.30.0.0/16` the check blocks `aap.aap.svc` without the entry; on one whose Service CIDR is outside RFC 1918 (the cluster this was developed on used `172.231.0.0/16`) it passes without it. Check with `oc get svc aap -n aap -o jsonpath='{.spec.clusterIP}'`.
 5. **Open the imported workflow** (see below), select the LLM on the `Verdict Explainer` node, and **publish** it.
 6. **The `ao-webhook` Secret** in `multivendor-rca`, then restart NEP (`oc rollout restart deploy/nep-orchestrator -n multivendor-rca`; the env is read at start):
    - `AO_CLIENT_ID`, `AO_CLIENT_SECRET`: the service account credential from step 1.
@@ -47,6 +49,12 @@ Manual, in the AO UI, on each new cluster:
    - `AO_WEBHOOK_PATH=ran-rca-concluded` (the trigger's `webhook_path`).
 
    AO's token endpoint is OAuth 2.0 `client_credentials` with a form-encoded body; NEP sends it that way.
+
+### Referencing the agent's output
+
+Despite AO's schema documenting an `output` field, an agent step's output at runtime is the raw agent result. With `response_schema` set, the fields sit at `${verdict_explainer.result.content.<field>}`. `${verdict_explainer.output.<field>}` fails with `Property "output" not found in step "verdict_explainer" output`. Observed on AO 2026.8.
+
+The model sometimes wraps its answer in an extra key. On one run the fields were at `result.content.final.<field>` and on later runs, with the same model and settings, at `result.content.<field>`. The reference path cannot adapt, so a wrapped answer fails the approval step with `Property "final" not found ...`. The workflow reduces the risk by making all four fields `required`, setting `additionalProperties: false`, and telling the model to use no wrapper key. If it still happens, re-run; check an execution's stored step output to see the shape.
 
 ### Workflow import (GitOps)
 

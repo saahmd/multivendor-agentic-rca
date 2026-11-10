@@ -10,11 +10,11 @@ See [workflow.mermaid](workflow.mermaid) for the flow.
 
 1. Console **Run RCA** → `nep-orchestrator /nep/rca/trigger`. When the verdict is not `NO_ACTION`, NEP posts the RCA event to the AO webhook (span 7, `Automation.AO.Handoff`).
 2. **Verdict Explainer** (task agent, RHOAI llm-d, no tools) writes a plain-language brief from the webhook payload.
-3. **Switch** on `${trigger.verdict}`: `APPLY` goes straight to the heal, `HOLD` goes to the approval, anything else ends.
+3. **Switch** on `${trigger.verdict}`: anything but `NO_ACTION` (that is `HOLD` or `APPLY`) goes to the approval, `NO_ACTION` ends.
 4. **Approval**: approved runs `RAN - Heal PTP Timing`, rejected runs `RAN - Record Rejection`.
 5. After the heal: wait 10 s, run a verification RCA (`?trigger=ao-verify`, which NEP does not hand back to AO), then `RAN - Close RCA` if the verdict is `NO_ACTION`, otherwise `RAN - Escalate`.
 
-In the demo the PTP fault is always `HOLD`, 2/3 (only RAN and PTP are real timing planes), so the approval path is the main path. The `APPLY` branch is there for completeness.
+In the demo the PTP fault is always `HOLD`, 2/3 (only RAN and PTP are real timing planes), so the approval path is the main path. `APPLY` would also go through the approval: this workflow has no automatic-heal path. That is deliberate: AO skips every node downstream of a switch port that was not taken, even when the node can also be reached from the approval, so an APPLY-straight-to-heal edge next to the approval edge made the heal skip itself after approval. A real auto-heal branch would need its own copy of the heal chain.
 
 ## Files
 

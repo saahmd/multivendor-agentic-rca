@@ -42,6 +42,10 @@ metadata:
 spec:
   ingress:
     type: Route
+  # Hosts the workflow's HTTP request step may call even though they resolve to cluster-internal IPs.
+  # Exact hostnames, as written in the workflow URL (the verification RCA step calls NEP).
+  workflowHttpRequestAllowedHosts:
+    - nep-orchestrator.multivendor-rca.svc
   postgres:
     host: postgresql
     port: 5432
