@@ -2,9 +2,7 @@
 
 The "act" layer of the multivendor agentic RCA lab. NEP's deterministic RCA decides the verdict. Automation Orchestrator (AO) governs and executes it: an LLM agent explains the verdict to a human approver, the approver decides, and AAP heals PTP timing and verifies the result.
 
-**The LLM never decides.** The AO switch branches on NEP's `verdict` field, and the agent's text is only shown to the approver.
 
-See [workflow.mermaid](workflow.mermaid) for the flow.
 
 ## Flow
 
@@ -14,7 +12,6 @@ See [workflow.mermaid](workflow.mermaid) for the flow.
 4. **Approval**: approved runs `RAN - Heal PTP Timing`, rejected runs `RAN - Record Rejection`.
 5. After the heal: wait 10 s, run a verification RCA (`?trigger=ao-verify`, which NEP does not hand back to AO), then `RAN - Close RCA` if the verdict is `NO_ACTION`, otherwise `RAN - Escalate`.
 
-In the demo the PTP fault is always `HOLD`, 2/3 (only RAN and PTP are real timing planes), so the approval path is the main path. `APPLY` would also go through the approval: this workflow has no automatic-heal path. That is deliberate: AO skips every node downstream of a switch port that was not taken, even when the node can also be reached from the approval, so an APPLY-straight-to-heal edge next to the approval edge made the heal skip itself after approval. A real auto-heal branch would need its own copy of the heal chain.
 
 ## Files
 
@@ -25,7 +22,6 @@ aap/playbooks/
   ran_close_rca.yml                 Reads the verification RCA and closes the RCA
   ran_escalate.yml                  Fails visibly when the fault is still present after the heal
   ran_record_rejection.yml          Records a rejected remediation
-workflow.mermaid                    Flow diagram
 ../deploy/base/aap/bootstrap/       Scripts run by GitOps Jobs: create the AAP project, inventory and job templates; import the AO workflow
 REQUIREMENTS.md                     Prerequisites, job templates, integrations
 ```
@@ -40,6 +36,4 @@ The heal runs straight after approval and assumes the fault is still present. Th
 
 GitOps (`mvrca-aap`) installs the AAP and AO operators and instances, creates the AAP project and job templates, and imports the workflow into AO as a draft. Still manual, in the AO UI: the service account (named `nep-orchestrator`, created before the import), the LLM and AAP integrations, the internal-URL allowlist, selecting the LLM on the workflow and publishing it, and the `ao-webhook` Secret for NEP. Details in [REQUIREMENTS.md](REQUIREMENTS.md).
 
-## Running the demo
 
-Open the AO UI in a separate tab. In the console: Start RAN → Inject → Run RCA. The execution appears in AO waiting at the approval; approve it and watch the console heal. Reject it instead to show the rejection path.
