@@ -124,39 +124,137 @@ oc get llminferenceservice llama-31-8b -n multivendor-rca
 oc get pods -n multivendor-rca | grep llama-31-8b
 ```
 
-## 7. Governed remediation with Automation Orchestrator (optional)
+## 7. Governed remediation with Automation Orchestrator and Ansible Automation Platform (optional)
 
-`mvrca-aap` installs AAP and Automation Orchestrator (AO), creates the AAP project and job templates (`aap-bootstrap` Job), and imports the workflow into AO as a draft (`ao-workflow-import` Job). A few things stay manual: they hold credentials or are chosen per cluster. Details: [ao-remediation/REQUIREMENTS.md](../ao-remediation/REQUIREMENTS.md).
+The `mvrca-aap` Argo CD app installs AAP and Automation Orchestrator (AO), then runs two Jobs:
 
-Wait for AAP and AO, then log in to AO (user `admin`):
+- `aap-bootstrap` creates the AAP project and job templates.
+- `ao-workflow-import` imports the workflow into AO as a **draft**.
+
+Some things stay manual because they hold credentials or differ per cluster. Details: [ao-remediation/REQUIREMENTS.md](../ao-remediation/REQUIREMENTS.md).
+
+Work through 7.1 to 7.8 **in order**.
+
+### 7.1 Wait for AAP and AO
 
 ```bash
 oc get ansibleautomationplatform,automationorchestrator -n aap
 oc logs job/aap-bootstrap -n aap | tail -3
+```
+
+Get the AO URL and the `admin` password (you need them to log in to AO):
+
+```bash
 oc get route automation-orchestrator -n aap -o jsonpath='https://{.spec.host}{"\n"}'
 oc get secret automation-orchestrator-initial-admin-password -n aap -o jsonpath='{.data.password}' | base64 -d; echo
 ```
 
-In the AO UI, in this order:
+### 7.2 Attach the AAP subscription
 
-1. **Service account** named `nep-orchestrator`, with a credential. Save the **client ID and secret** (the secret is shown once). Rotate the credential if you lose it; do not delete the account.
-2. **Import the workflow:** sync `mvrca-aap` in Argo CD, then check `oc logs job/ao-workflow-import -n aap` says `created as a draft`. It skips with `SKIPPED` if step 1 isn't done.
-3. **LLM integration in AO UI:** provider *Red Hat AI* (OpenAI-compatible), your LLM base URL and key.
-4. **Allow the AAP host on AO** (before the AAP integration; not GitOps-managed, and it restarts the pods). Set it on all three AO deployments, not just the backend:
+A fresh AAP has no license. Without one, `aap-bootstrap` cannot create the project and job templates.
+
+1. Get the AAP URL and admin password:
 
    ```bash
-   oc set env \
-     deployment/automation-orchestrator-backend \
-     deployment/automation-orchestrator-worker \
-     deployment/automation-orchestrator-background-worker \
-     -n aap \
-     'APP_INTEGRATION_URL_ALLOWED_HOSTS=["aap.aap.svc"]'
+   oc get route aap -n aap -o jsonpath='https://{.spec.host}{"\n"}'
+   oc get secret aap-admin-password -n aap -o jsonpath='{.data.password}' | base64 -d; echo
    ```
 
-5. **AAP integration in AO:** base URL `http://aap.aap.svc` (not `.svc.cluster.local`, which AO blocks), **Allow HTTP** on, and a basic-auth credential: user `admin`, password from `oc get secret aap-admin-password -n aap -o jsonpath='{.data.password}' | base64 -d`.
-6. **Publish the workflow:** open *RAN Timing Fault - Governed Remediation*, select the LLM on the **Verdict Explainer** node, publish.
+2. Log in to AAP as `admin` and open *Subscription* (*Subscription settings*).
+3. Choose **Username and password** and enter your Red Hat credentials.
+4. Select a subscription and click **Next**.
+5. Accept the analytics terms and click **Submit**.
 
-Then tell NEP where AO is. This Secret holds credentials, so it is not in Git (use the client ID and secret from step 1):
+Re-run the bootstrap Job and watch it finish:
+
+```bash
+oc delete job aap-bootstrap -n aap --ignore-not-found
+oc apply -f deploy/base/aap/bootstrap-job.yaml
+oc logs -f job/aap-bootstrap -n aap
+```
+
+### 7.3 Create the AO service account
+
+In the AO UI, go to *System Administration → Access Management → Service Accounts → Create service account*.
+
+- Project: `Default`
+- Name: `nep-orchestrator`
+
+Click **Create service account**, then **save the client ID and secret**. The secret is shown only once. You need both in 7.8.
+
+### 7.4 Import the workflow
+
+Sync `mvrca-aap` in Argo CD to run the `ao-workflow-import` Job, then read its log:
+
+```bash
+oc logs job/ao-workflow-import -n aap
+```
+
+- `created as a draft`: the import worked. In the AO UI open *Workflows* and check that **RAN Timing Fault - Governed Remediation** is listed.
+- `SKIPPED`: the service account from 7.3 is missing. Create it, then sync again.
+
+### 7.5 Add the LLM integration
+
+In the AO UI, go to *Configuration → Integrations → Configure Integration* and set:
+
+| Field | Value |
+|---|---|
+| Integration type | LLM provider |
+| Name | any name you like |
+| Provider type | Red Hat AI |
+| API URL | your OpenAI-compatible LLM URL |
+
+Click **Next**, then create a credential in the **default** project (any name, plus your API key).
+
+### 7.6 Allow the AAP host in AO
+
+Do this **before** adding the AAP integration. It restarts the AO pods. Set it on all three AO deployments, not only the backend:
+
+```bash
+oc set env \
+  deployment/automation-orchestrator-backend \
+  deployment/automation-orchestrator-worker \
+  deployment/automation-orchestrator-background-worker \
+  -n aap \
+  'APP_INTEGRATION_URL_ALLOWED_HOSTS=["aap.aap.svc"]'
+```
+
+### 7.7 Add the AAP integration and publish the workflow
+
+**Add the AAP integration.** In the AO UI, go to *Configuration → Integrations → Configure Integration* and set:
+
+| Field | Value |
+|---|---|
+| Integration type | Ansible Automation Platform |
+| Server name/ID | any name you like |
+| API URL | `http://aap.aap.svc` (use `.svc`, not `.svc.cluster.local`, which AO blocks) |
+| Security | turn **Allow HTTP** on |
+
+Click **Next**, then create a credential in the **default** project:
+
+- Auth method: **basic-auth**
+- Username: `admin`
+- Password: the output of this command:
+
+  ```bash
+  oc get secret aap-admin-password -n aap -o jsonpath='{.data.password}' | base64 -d; echo
+  ```
+
+**Wire up the workflow nodes.** Open **RAN Timing Fault - Governed Remediation**. For each node below, open it, choose the values shown, and click **Update**.
+
+| Node | Integration and credential | Job template |
+|---|---|---|
+| Verdict Explainer | the LLM model and credential from 7.5 | n/a |
+| RAN - Heal PTP Timing | the AAP integration and credential above | RAN - Heal PTP Timing |
+| Record rejection / open incident | the AAP integration and credential above | RAN - Record Rejection |
+| RAN - Close RCA | the AAP integration and credential above | RAN - Close RCA |
+| RAN - Escalate | the AAP integration and credential above | RAN - Escalate |
+
+Then click **Publish**.
+
+### 7.8 Tell NEP where AO is
+
+This Secret holds credentials, so it is not in Git. Use the client ID and secret you saved in 7.3:
 
 ```bash
 oc create secret generic ao-webhook -n multivendor-rca \
@@ -167,9 +265,24 @@ oc create secret generic ao-webhook -n multivendor-rca \
 oc rollout restart deploy/nep-orchestrator -n multivendor-rca
 ```
 
-Test: in the demo, Start RAN, Inject Fault, Run RCA. The `Automation.AO.Handoff` span shows `DISPATCHED` and an execution waits for approval in AO. If it shows `ERROR`, the span's `ao.reason` says why.
+**Quick test:** in the demo console, click Start RAN, Inject Fault, then Run RCA. The `Automation.AO.Handoff` span should show `DISPATCHED`, and an execution should be waiting for approval in AO. If it shows `ERROR`, the span's `ao.reason` says why.
 
-## 8. Check
+## 8. Approve the remediation in the AO UI
+
+Running the 4-plane agentic RCA in the console triggers the workflow in AO automatically.
+
+1. Open the AO UI and go to *Workflow runs*.
+2. Open the latest run. It is **waiting for approval**. The Verdict Explainer's brief tells you what failed and what approving will do.
+3. Click **Approve**.
+
+After approval, AO runs these AAP job templates in order:
+
+1. **RAN - Heal PTP Timing** heals the PTP fault and unlocks the cell. The console log shows the same lines as the Heal Timing button.
+2. **RAN - Close RCA** records the outcome. It does not change anything. It is there to show what a complete workflow looks like in a real environment.
+
+If you **reject** instead, **RAN - Record Rejection** runs and nothing is healed.
+
+## 9. Check
 
 ```bash
 oc get pods -n multivendor-rca
