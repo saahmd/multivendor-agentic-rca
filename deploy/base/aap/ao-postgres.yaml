@@ -7,7 +7,7 @@ metadata:
   name: postgresql
   namespace: aap
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "-1"
 type: Opaque
 stringData:
   database-user: ao
@@ -22,7 +22,9 @@ metadata:
   name: postgresql
   namespace: aap
   annotations:
-    argocd.argoproj.io/sync-wave: "-1"
+    # Same wave as the DeploymentConfig: with a WaitForFirstConsumer storage class the PVC stays Pending
+    # until the pod exists, so an earlier wave would wait on the PVC forever and never create the consumer.
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   accessModes: [ReadWriteOnce]
   resources:
