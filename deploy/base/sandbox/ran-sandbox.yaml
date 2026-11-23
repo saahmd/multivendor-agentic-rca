@@ -70,6 +70,8 @@ spec:
             - { name: ODU_URL, value: "http://ran-slice:7010" }
             - { name: PTP_BRIDGE_URL, value: "http://ptp-bridge:7091" }
             - { name: NEP_URL, value: "http://nep-orchestrator:7095" }
+          envFrom:
+            - secretRef: { name: aap-heal, optional: true }   # AAP_URL, AAP_TOKEN, AAP_HEAL_TEMPLATE
           ports: [{ name: http, containerPort: 7098 }]
           readinessProbe:
             httpGet: { path: /healthz, port: 7098 }

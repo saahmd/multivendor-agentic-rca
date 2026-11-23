@@ -123,8 +123,70 @@ If `dsc/default-dsc` is NotFound, `mvrca-operators` is still installing — wait
 oc get llminferenceservice llama-31-8b -n multivendor-rca
 oc get pods -n multivendor-rca | grep llama-31-8b
 ```
+## 7. Configure Ansible Automation Platform
 
-## 7. Check
+Do this after `mvrca-aap` is **Synced** in Argo CD. 
+
+### 7a. Get the AAP UI URL and admin password
+
+```bash
+AAP_HOST=$(oc get route aap -n aap -o jsonpath='{.spec.host}' 2>/dev/null || \
+           oc get route aap-controller -n aap -o jsonpath='{.spec.host}')
+echo "https://${AAP_HOST}"
+
+AAP_PASS=$(oc get secret aap-admin-password -n aap -o jsonpath='{.data.password}' | base64 -d)
+echo "admin / ${AAP_PASS}"
+```
+
+### 7b. Attach a subscription in the AAP UI
+
+Open `https://${AAP_HOST}` and log in as **admin**. AAP will prompt for a subscription on first login — either:
+
+- Upload a subscription manifest zip (**Settings → Subscription → Upload a subscription manifest**), or
+- Log in with your Red Hat credentials to pull an attached subscription.
+
+Without a subscription the bootstrap job will warn and exit non-zero; job templates exist but cannot launch.
+
+### 7c. Watch the bootstrap job
+
+The `aap-bootstrap` PostSync job creates the **RAN Remediation** project and the **RAN - Heal PTP Timing** job template. 
+
+```bash
+oc logs -n aap -l app=aap-bootstrap -f --tail=50
+```
+
+If it exits non-zero because the subscription was missing, re-sync `mvrca-aap` after attaching the subscription to re-run the job:
+
+Verify the template appears in the AAP UI under **Templates**.
+
+### 7d. Create an AAP token
+
+**Access AAP UI:** Go to Access Management → Users → admin → Tokens → Add → scope **Write** → Save. Copy the token value (shown only once).
+
+### 7e. Create the aap-heal Secret and restart the sandbox controller
+
+```bash
+oc create secret generic aap-heal -n multivendor-rca \
+  --from-literal=AAP_URL=http://aap.aap.svc.cluster.local \
+  --from-literal=AAP_TOKEN="AAP_TOKEN"
+
+oc rollout restart deploy/ran-sandbox-controller -n multivendor-rca
+oc rollout status deploy/ran-sandbox-controller -n multivendor-rca
+```
+
+### 7f. Verify
+
+Open the demo console. Press **Heal Timing** — the console log should show:
+
+```
+AAP: launched job N (RAN - Heal PTP Timing)
+PTP-BRIDGE: POST /ptp/heal → lock_state=LOCKED
+O1: PUT O-DU /o1/config administrativeState=UNLOCKED
+AAP: job N successful
+```
+
+The job also appears in the AAP UI under **Jobs**. If the Secret does not exist or `AAP_URL`/`AAP_TOKEN` are unset, the button falls back to direct heal automatically (log shows `AAP not configured: healing directly`).
+## 8. Check
 
 ```bash
 oc get pods -n multivendor-rca

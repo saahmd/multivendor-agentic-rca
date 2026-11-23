@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Create the AAP objects the Heal Timing button launches. Idempotent: every object is
+looked up by name and created or updated, so re-running (Argo CD runs it after every sync) is safe.
+
+Creates, in organization Default:
+  project         RAN Remediation          this repo, from the in-cluster Gitea (public repo, no credential)
+  inventory       RAN Localhost            one host, localhost, local connection (the playbooks only call HTTP APIs).
+                                           The host needs an AAP subscription; without one it is skipped with a warning.
+  job template    RAN - Heal PTP Timing    launched directly by the sandbox controller's Heal Timing button
+
+Stdlib only. Config comes from environment variables.
+"""
+import base64
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+AAP_URL = os.environ.get("AAP_URL", "http://aap.aap.svc.cluster.local").rstrip("/")
+API = AAP_URL + "/api/controller/v2"
+ADMIN_USER = os.environ.get("AAP_ADMIN_USER", "admin")
+ADMIN_PASSWORD = os.environ["AAP_ADMIN_PASSWORD"]
+SCM_URL = os.environ.get("SCM_URL", "http://gitea-http.gitea.svc.cluster.local:3000/gitadmin/multivendor-agentic-rca.git")
+SCM_BRANCH = os.environ.get("SCM_BRANCH", "main")
+ORG = os.environ.get("AAP_ORGANIZATION", "Default")
+WAIT_READY = float(os.environ.get("WAIT_READY_SECONDS", "2400"))     # AAP takes a while to come up
+WAIT_PROJECT = float(os.environ.get("WAIT_PROJECT_SECONDS", "300"))
+PLAYBOOK_DIR = "aap-remediation/playbooks"
+# Optional: base64 of a Red Hat subscription manifest zip (Secret `aap-subscription`, key `manifest`).
+# Applied only when AAP has no license yet.
+MANIFEST_B64 = os.environ.get("AAP_SUBSCRIPTION_MANIFEST_B64", "").strip()
+
+TEMPLATES = {
+    "RAN - Heal PTP Timing": "ran_heal_ptp.yml",
+}
+
+_AUTH = "Basic " + base64.b64encode(f"{ADMIN_USER}:{ADMIN_PASSWORD}".encode()).decode()
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def call(method, path, body=None, timeout=30):
+    """Returns (status, parsed JSON or {}). Transport failures come back as status 0."""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(API + path, data=data, method=method,
+                                 headers={"Authorization": _AUTH, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw) if raw else {}
+        except ValueError:
+            return e.code, {"detail": raw.decode(errors="replace")[:300]}
+    except Exception as e:
+        return 0, {"detail": str(e)}
+
+
+def wait_for_aap():
+    log(f"waiting for AAP at {API} (up to {WAIT_READY:.0f}s)")
+    deadline = time.time() + WAIT_READY
+    last = None
+    while time.time() < deadline:
+        code, body = call("GET", "/ping/", timeout=10)
+        if code == 200:
+            code, _ = call("GET", "/organizations/?page_size=1")
+            if code == 200:
+                log("AAP controller is up and the admin login works")
+                return
+            last = f"ping ok but admin login returned HTTP {code}"
+        else:
+            last = f"HTTP {code}: {body.get('detail', '')}"
+        time.sleep(15)
+    sys.exit(f"AAP not ready after {WAIT_READY:.0f}s ({last})")
+
+
+def ensure_license():
+    """AAP refuses to create hosts or launch jobs without a subscription. Attach one from the optional
+    Secret if given; otherwise warn (the heal job cannot launch until one is attached)."""
+    code, cfg = call("GET", "/config/")
+    if code == 200 and cfg.get("license_info"):
+        log("AAP has a subscription")
+        return True
+    if MANIFEST_B64:
+        code, body = call("POST", "/config/", {"eula_accepted": True, "manifest": MANIFEST_B64}, timeout=120)
+        if code in (200, 201):
+            log("subscription manifest applied")
+            return True
+        log(f"WARNING: applying the subscription manifest failed: HTTP {code} {str(body)[:200]}")
+    else:
+        log("WARNING: AAP has no subscription. Attach one in the AAP UI (Settings > Subscription), or create Secret "
+            "aap-subscription (key manifest = base64 of the manifest zip) in namespace aap and re-sync. "
+            "Hosts cannot be created and jobs will not launch until then.")
+    return False
+
+
+def find(kind, name, **filters):
+    q = "&".join(f"{k}={urllib.request.quote(str(v))}" for k, v in {"name": name, **filters}.items())
+    code, body = call("GET", f"/{kind}/?{q}")
+    if code != 200:
+        sys.exit(f"lookup {kind} '{name}' failed: HTTP {code} {body}")
+    return (body.get("results") or [None])[0]
+
+
+def ensure(kind, name, payload, **filters):
+    """Create the object, or PATCH it if it already exists. Returns the object."""
+    existing = find(kind, name, **filters)
+    if existing:
+        code, body = call("PATCH", f"/{kind}/{existing['id']}/", payload)
+        verb = "updated"
+    else:
+        code, body = call("POST", f"/{kind}/", {"name": name, **payload})
+        verb = "created"
+    if code not in (200, 201):
+        sys.exit(f"{kind} '{name}' could not be {verb}: HTTP {code} {body}")
+    log(f"{kind} '{name}' {verb} (id {body['id']})")
+    return body
+
+
+def wait_for_project(project):
+    log(f"waiting for project '{project['name']}' to sync from {SCM_URL} (up to {WAIT_PROJECT:.0f}s)")
+    deadline = time.time() + WAIT_PROJECT
+    status = None
+    while time.time() < deadline:
+        code, body = call("GET", f"/projects/{project['id']}/")
+        status = body.get("status")
+        if status == "successful":
+            log("project synced")
+            return
+        if status in ("failed", "error", "canceled"):
+            sys.exit(f"project sync {status}: check that {SCM_URL} exists and branch '{SCM_BRANCH}' has "
+                     f"{PLAYBOOK_DIR}/ (push this repo to Gitea first)")
+        time.sleep(5)
+    sys.exit(f"project still '{status}' after {WAIT_PROJECT:.0f}s")
+
+
+def main():
+    wait_for_aap()
+    org = find("organizations", ORG)
+    if not org:
+        sys.exit(f"organization '{ORG}' not found")
+
+    project = ensure("projects", "RAN Remediation",
+                     {"organization": org["id"], "scm_type": "git", "scm_url": SCM_URL, "scm_branch": SCM_BRANCH,
+                      "scm_update_on_launch": True, "description": "Playbooks for the RAN timing remediation"},
+                     organization=org["id"])
+    wait_for_project(project)
+
+    inv = ensure("inventories", "RAN Localhost", {"organization": org["id"],
+                 "description": "The remediation playbooks only call in-cluster HTTP APIs from the controller"},
+                 organization=org["id"])
+    licensed = ensure_license()
+    if not find("hosts", "localhost", inventory=inv["id"]):
+        code, body = call("POST", f"/inventories/{inv['id']}/hosts/",
+                          {"name": "localhost", "variables": "ansible_connection: local\nansible_python_interpreter: \"{{ ansible_playbook_python }}\""})
+        if code in (200, 201):
+            log("host 'localhost' created")
+        elif not licensed:
+            log(f"host 'localhost' skipped: HTTP {code} {body.get('detail', body)} (the playbooks use the implicit localhost)")
+        else:
+            sys.exit(f"host 'localhost' could not be created: HTTP {code} {body}")
+
+    for name, playbook in TEMPLATES.items():
+        ensure("job_templates", name,
+               {"organization": org["id"], "project": project["id"], "inventory": inv["id"],
+                "playbook": f"{PLAYBOOK_DIR}/{playbook}", "job_type": "run", "ask_variables_on_launch": True,
+                "description": "Launched directly by the sandbox controller's Heal Timing button"},
+               organization=org["id"])
+
+    if not licensed:
+        sys.exit("project and job template are created, but AAP has no subscription: attach one, then re-sync "
+                 "mvrca-aap (see the WARNING above). Exiting non-zero so this is not mistaken for done.")
+    log("AAP is ready. Create Secret aap-heal in multivendor-rca with AAP_URL and AAP_TOKEN to enable the Heal button.")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,15 @@
+# AAP operator + instance. Apply via the overlay:  oc apply -k deploy/overlays/aap
+# The AAP CR is rejected until the operator's CRD exists. On a plain `oc apply` re-run it once
+# the CSV is Succeeded, or let Argo CD sync it (SkipDryRunOnMissingResource + sync waves).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - subscriptions.yaml
+  - aap-instance.yaml
+  - bootstrap-job.yaml
+configMapGenerator:
+  - name: aap-bootstrap-script
+    namespace: aap
+    files:
+      - bootstrap/bootstrap_aap.py

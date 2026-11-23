@@ -1,0 +1,33 @@
+# ArgoCD Application for AAP (operator, instance, bootstrap job).
+# Sync waves inside deploy/overlays/aap order it: namespace, OperatorGroup, Subscription, AAP CR.
+# SkipDryRunOnMissingResource lets the AAP CR wait until the operator's CRD exists.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mvrca-aap
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+spec:
+  destination:
+    namespace: aap
+    server: https://kubernetes.default.svc
+  project: mvrca
+  source:
+    path: deploy/overlays/aap
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/gitadmin/multivendor-agentic-rca.git
+    targetRevision: main
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 20
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+      - ServerSideApply=true

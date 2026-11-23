@@ -57,6 +57,11 @@ UE_K = os.environ.get("UE_K", "465b5ce8b199b49faa5f0a2ee238a6bc")   # the seeded
 UE_ECHOES = os.environ.get("UE_ECHOES", "3")
 SLICE_PORT_OFFSET = os.environ.get("SLICE_PORT_OFFSET", "0")   # the slice's TELCO_PORT_OFFSET
 
+AAP_URL = os.environ.get("AAP_URL", "").rstrip("/")
+AAP_TOKEN = os.environ.get("AAP_TOKEN", "")
+AAP_HEAL_TEMPLATE = os.environ.get("AAP_HEAL_TEMPLATE", "RAN - Heal PTP Timing")
+AAP_JOB_TIMEOUT = float(os.environ.get("AAP_JOB_TIMEOUT", "180"))
+
 SA_DIR = Path(os.environ.get("K8S_SA_DIR", "/var/run/secrets/kubernetes.io/serviceaccount"))
 K8S_API = os.environ.get("K8S_API_URL", "https://kubernetes.default.svc").rstrip("/")
 
@@ -67,6 +72,19 @@ def _now():
 
 def _hms(dt):
     return dt.strftime("%H:%M:%S.%f")[:-3]
+
+
+def _aap(method, path, body=None, timeout=20):
+    """Call the AAP controller API. Raises on HTTP errors."""
+    import urllib.parse
+    url = AAP_URL + "/api/controller/v2" + path
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={"Authorization": f"Bearer {AAP_TOKEN}",
+                                          "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read()
+        return json.loads(raw) if raw else {}
 
 
 # ----------------------------------------------------------------------------- Kubernetes
@@ -263,6 +281,40 @@ class SandboxController:
         o1 = self._o1_admin("UNLOCKED")
         return {"ptp": ptp, "o1": o1}
 
+    def _heal_aap(self):
+        if not (AAP_URL and AAP_TOKEN):
+            self.log("AAP", "not configured (AAP_URL/AAP_TOKEN unset): healing directly")
+            return self.heal()
+        try:
+            import urllib.parse
+            result = _aap("GET", f"/job_templates/?name={urllib.parse.quote(AAP_HEAL_TEMPLATE)}")
+            items = result.get("results") or []
+            if not items:
+                self.log("AAP", f"job template '{AAP_HEAL_TEMPLATE}' not found")
+                return {"error": "template not found"}
+            tmpl_id = items[0]["id"]
+            ns = self.kube.namespace
+            extra = {"sandbox_url": f"http://ran-sandbox-controller.{ns}.svc:7098"}
+            launched = _aap("POST", f"/job_templates/{tmpl_id}/launch/", {"extra_vars": extra})
+            job_id = launched.get("id")
+            self.log("AAP", f"launched job {job_id} ({AAP_HEAL_TEMPLATE})")
+            deadline = time.time() + AAP_JOB_TIMEOUT
+            while time.time() < deadline:
+                time.sleep(3)
+                job = _aap("GET", f"/jobs/{job_id}/")
+                status = job.get("status", "")
+                if status in ("successful", "failed", "error", "canceled"):
+                    self.log("AAP", f"job {job_id} {status}")
+                    return {"job_id": job_id, "status": status}
+            self.log("AAP", f"job {job_id} timed out after {AAP_JOB_TIMEOUT:.0f}s")
+            return {"job_id": job_id, "status": "timeout"}
+        except Exception as exc:
+            self.log("AAP", f"error: {exc}")
+            return {"error": str(exc)}
+
+    def heal_via_aap(self):
+        return self._run("HEALING", self._heal_aap)
+
     # -- observation
     def _pod_phase(self):
         try:
@@ -408,7 +460,7 @@ HTML_PAGE = """<!DOCTYPE html>
             </button>
             <button onclick="controlRAN('heal')" class="bg-white hover:bg-[#f3f4f6] text-[#0969da] p-3 rounded-lg border border-[#d0d7de] shadow-sm text-left transition active:scale-[0.99]">
               <div class="font-medium text-xs text-[#0969da]">Heal Timing</div>
-              <div class="text-[10px] text-[#656d76] mt-0.5">PTP LOCKED + O1 unlock</div>
+              <div class="text-[10px] text-[#656d76] mt-0.5">AAP job: PTP LOCKED + O1 unlock</div>
             </button>
           </div>
           <div class="text-[11px] font-mono text-[#656d76]">Pod: <span id="pod-val">-</span></div>
@@ -501,7 +553,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     async function controlRAN(action) {
-      const url = {'start': '/api/ran/start', 'stop': '/api/ran/stop', 'inject-fault': '/api/ran/inject-ptp-fault', 'heal': '/api/ran/heal-ptp'}[action];
+      const url = {'start': '/api/ran/start', 'stop': '/api/ran/stop', 'inject-fault': '/api/ran/inject-ptp-fault', 'heal': '/api/ran/heal'}[action];
       await fetch(url, { method: 'POST' });
       updateUI();
       fetchLogs();
@@ -636,6 +688,8 @@ class SandboxHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, ctl.inject())
         elif self.path == "/api/ran/heal-ptp":
             self._send_json(200, ctl.heal())
+        elif self.path == "/api/ran/heal":
+            self._send_json(202, ctl.heal_via_aap())
         elif self.path == "/api/ran/trigger-rca":
             try:
                 audit_trace = http_json("POST", f"{NEP_URL}/nep/rca/trigger?view=full", {}, timeout=RCA_TIMEOUT)
